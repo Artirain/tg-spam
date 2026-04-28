@@ -3519,3 +3519,31 @@ func findResponseByName(responses []spamcheck.Response, name string) *spamcheck.
 	}
 	return nil
 }
+
+func TestDetector_SharedSamplesModel_UpdatesPropagate(t *testing.T) {
+	model := NewSamplesModel()
+	cfg := Config{MinMsgLen: 1, MinSpamProbability: 0.5}
+	d1 := NewDetectorWithModel(cfg, model)
+	d2 := NewDetectorWithModel(cfg, model)
+
+	// updater is required for UpdateSpam to actually update the model
+	d1.WithSpamUpdater(&mocks.SampleUpdaterMock{AppendFunc: func(msg string) error { return nil }})
+
+	spam := bytes.NewBufferString("buy cheap viagra now\nclick here to win cash\n")
+	ham := bytes.NewBufferString("the weather is lovely today\nlet's discuss the project plan\n")
+	excl := bytes.NewBufferString("")
+	_, err := d1.LoadSamples(excl, []io.Reader{spam}, []io.Reader{ham})
+	require.NoError(t, err)
+
+	require.True(t, model.classifierReady(), "shared classifier ready after d1 loads samples")
+	require.Greater(t, model.tokenizedSpamLen(), 0, "shared model has tokenized spam after d1 loads samples")
+
+	before := model.tokenizedSpamLen()
+	require.NoError(t, d1.UpdateSpam("free crypto airdrop dm me"))
+	assert.Equal(t, before+1, model.tokenizedSpamLen(),
+		"UpdateSpam on d1 must propagate to the shared model that d2 also sees")
+
+	// d2's view of the model is identical because they share the pointer
+	assert.Equal(t, model.tokenizedSpamLen(), d2.model.tokenizedSpamLen())
+	assert.Equal(t, model.classifierReady(), d2.model.classifierReady())
+}
