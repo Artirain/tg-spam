@@ -3536,7 +3536,7 @@ func TestDetector_SharedSamplesModel_UpdatesPropagate(t *testing.T) {
 	require.NoError(t, err)
 
 	require.True(t, model.classifierReady(), "shared classifier ready after d1 loads samples")
-	require.Greater(t, model.tokenizedSpamLen(), 0, "shared model has tokenized spam after d1 loads samples")
+	require.Positive(t, model.tokenizedSpamLen(), "shared model has tokenized spam after d1 loads samples")
 
 	before := model.tokenizedSpamLen()
 	require.NoError(t, d1.UpdateSpam("free crypto airdrop dm me"))

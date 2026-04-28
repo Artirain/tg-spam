@@ -65,7 +65,7 @@ func TestSamplesModel_ConcurrentReadWrite(t *testing.T) {
 	const N = 16
 	var wg sync.WaitGroup
 	wg.Add(2 * N)
-	for i := 0; i < N; i++ {
+	for i := range N {
 		go func(i int) {
 			defer wg.Done()
 			_ = d1.UpdateSpam(fmt.Sprintf("spam sample %d", i))
