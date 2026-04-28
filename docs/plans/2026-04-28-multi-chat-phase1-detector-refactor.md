@@ -1,10 +1,15 @@
-# Multi-Chat Phase 1 — Detector Refactor Implementation Plan
+# Multi-Chat Phase 1 — Detector Refactor Implementation Plan (v1.1)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Refactor `lib/tgspam.Detector` so that the shared sample-derived model state (classifier + tokenized spam + stop words + excluded tokens) lives in a separate `SamplesModel` struct that can be **shared by reference** across multiple `Detector` instances. After this phase, behavior is unchanged for single-Detector callers; multi-Detector use is enabled but not yet wired.
+**Goal:** Refactor `lib/tgspam.Detector` so that the shared sample-derived model state (classifier + tokenized spam + stop words + excluded tokens) lives in a separate `SamplesModel` struct that can be **shared by reference** across multiple `Detector` instances. After this phase, behavior is unchanged for single-Detector callers; multi-Detector use is enabled but not yet wired into `app/`.
 
-**Architecture:** Introduce `SamplesModel` (mutex-guarded bundle of state mutated by `LoadSamples`/`UpdateSpam`/`UpdateHam`/`RemoveSpam`/`RemoveHam`/`Reset`). `Detector` holds `*SamplesModel` (pointer). Per-Detector state stays on `Detector`: `approvedUsers`, `duplicateDetector`, `reactionDetector`, `hamHistory`, `spamHistory`, `userStorage`, LLM clients, lua engine, meta checks. `NewDetector` continues to allocate a fresh `SamplesModel` when none is supplied — preserving today's API and tests verbatim.
+**Architecture:**
+- Introduce `SamplesModel` as a mutex-guarded bundle of `classifier`, `tokenizedSpam`, `stopWords`, `excludedTokens` and a few related methods (`Reset`, `tokenize`, `LoadSamples` worker).
+- `Detector` holds `*SamplesModel` (pointer). Per-Detector state stays on `Detector`: `approvedUsers`, `duplicateDetector`, `reactionDetector`, `hamHistory`, `spamHistory`, `userStorage`, LLM clients, lua engine, meta checks.
+- `NewDetector` continues to allocate a fresh private `SamplesModel` — preserving today's API. New `NewDetectorWithModel(cfg, model)` constructor is the entry point for sharing.
+- **Lock-order invariant:** `Detector.lock` is **always acquired before** `SamplesModel.lock`. SamplesModel methods never call back into Detector. Any method that needs both takes Detector.lock first, then SamplesModel.lock — never the reverse.
+- **Reset semantics warning:** calling `Detector.Reset()` on a Detector that shares its `SamplesModel` with other Detectors **wipes the shared state for all of them**. Callers in multi-chat mode (Phase 2+) must coordinate Reset with this in mind. Single-chat callers are unaffected.
 
 **Tech Stack:** Go 1.24+, `lib/tgspam` package, `github.com/stretchr/testify`, `go test -race ./...`, `golangci-lint run`.
 
@@ -16,12 +21,12 @@
 
 | File | Action | Responsibility |
 |---|---|---|
-| `lib/tgspam/samples_model.go` | Create | New struct `SamplesModel` bundling classifier + tokenizedSpam + stopWords + excludedTokens behind a `sync.RWMutex`. Methods: `NewSamplesModel`, `Reset` |
-| `lib/tgspam/samples_model_test.go` | Create | Unit tests for `SamplesModel` construction, `Reset`, concurrent safety |
-| `lib/tgspam/detector.go` | Modify | Replace four fields with `model *SamplesModel`. All read/write of these fields goes through the shared model. `NewDetector` accepts optional shared model |
-| `lib/tgspam/detector_test.go` | Modify | Add tests for shared-model behavior (UpdateSpam visible across detectors), isolation behavior (approvedUsers per-detector). Existing tests left untouched |
+| `lib/tgspam/samples_model.go` | Create | New `SamplesModel` bundling classifier + tokenizedSpam + stopWords + excludedTokens behind a `sync.RWMutex`. Methods: `NewSamplesModel`, `Reset`, `tokenize`, plus internal helpers reachable from Detector |
+| `lib/tgspam/samples_model_test.go` | Create | Unit tests for `SamplesModel` construction, `Reset`, concurrent safety, `tokenize` correctness |
+| `lib/tgspam/detector.go` | Modify | Replace four fields with `model *SamplesModel`. All read/write of these fields goes through the shared model. `NewDetector` preserves current signature; new `NewDetectorWithModel(cfg, model)` added |
+| `lib/tgspam/detector_test.go` | Modify | Update ~24 direct field accesses (`d.classifier.*`, `d.tokenizedSpam`, `d.excludedTokens`, `d.stopWords`) to read through the model. Update `BenchmarkTokenize` if it uses `Detector{excludedTokens:...}` literal. Add new tests for shared/isolated behavior |
 
-The plan deliberately keeps the public `Detector` API stable — existing call sites in `app/main.go`, `app/bot/spam.go`, `lib/tgspam/detector_test.go`, and CLI tools continue to work without changes.
+The plan deliberately keeps the public `Detector` API stable for `app/main.go`, `app/bot/spam.go`, and external CLI tools — they need no changes.
 
 ---
 
@@ -33,15 +38,15 @@ The plan deliberately keeps the public `Detector` API stable — existing call s
 git status --short
 ```
 
-Expected: empty output (or only untracked spec files). Stash anything else first.
+Expected: empty output (or only untracked files unrelated to this plan). Stash anything else.
 
 - [ ] **Pre-flight 2: baseline test run**
 
 ```bash
-go test -race ./lib/tgspam/...
+go test -race ./lib/tgspam/... -count=1
 ```
 
-Expected: all tests pass. Capture the exact pass count for later comparison.
+Expected: all tests pass. Capture the pass count for later comparison.
 
 - [ ] **Pre-flight 3: baseline lint**
 
@@ -49,17 +54,27 @@ Expected: all tests pass. Capture the exact pass count for later comparison.
 golangci-lint run ./lib/tgspam/...
 ```
 
-Expected: no errors. Anything we touch later will need to clear this same bar.
+Expected: no errors.
+
+- [ ] **Pre-flight 4: confirm benchmark exists for tokenize**
+
+```bash
+grep -rn "BenchmarkTokenize\|benchmark.*okenize" lib/tgspam/
+```
+
+Capture the location — Task 6 will need to update its `Detector{...}` literal if it uses the removed fields.
 
 ---
 
-## Task 1: Create `SamplesModel` skeleton
+## Task 1: Create `SamplesModel` skeleton with `tokenize` method
+
+`tokenize` lives on `SamplesModel`, not `Detector`. This avoids the fragile "caller must hold lock" comment contract — `tokenize` takes its own RLock when callers don't already hold one, and there's a `tokenizeUnlocked` variant for callers (like `LoadSamples`) that hold the write lock and would deadlock on reentry.
 
 **Files:**
 - Create: `lib/tgspam/samples_model.go`
 - Create: `lib/tgspam/samples_model_test.go`
 
-- [ ] **Step 1: Write the failing test for `NewSamplesModel`**
+- [ ] **Step 1: Write failing test for `NewSamplesModel`**
 
 Create `lib/tgspam/samples_model_test.go`:
 
@@ -67,6 +82,7 @@ Create `lib/tgspam/samples_model_test.go`:
 package tgspam
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -76,23 +92,24 @@ import (
 func TestNewSamplesModel(t *testing.T) {
 	m := NewSamplesModel()
 	require.NotNil(t, m)
-	assert.Empty(t, m.tokenizedSpam())
-	assert.Empty(t, m.stopWords())
-	assert.Empty(t, m.excludedTokens())
-	// classifier is freshly allocated and has no learned documents yet
-	assert.Equal(t, 0, m.classifierStats().AllDocs)
+	assert.Equal(t, 0, m.classifierAllDocs())
+	assert.Equal(t, 0, m.tokenizedSpamLen())
+	assert.Equal(t, 0, m.stopWordsLen())
+	assert.Equal(t, 0, m.excludedTokensLen())
 }
+
+var _ = sync.RWMutex{} // imports stay used after later tasks add concurrency tests
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run, expect compile failure**
 
 ```bash
 go test -race ./lib/tgspam/ -run TestNewSamplesModel -v
 ```
 
-Expected: `undefined: NewSamplesModel` compile error.
+Expected: `undefined: NewSamplesModel`.
 
-- [ ] **Step 3: Implement `SamplesModel` skeleton**
+- [ ] **Step 3: Implement `SamplesModel`**
 
 Create `lib/tgspam/samples_model.go`:
 
@@ -105,12 +122,15 @@ import "sync"
 // Multiple Detector instances may share a single *SamplesModel by reference so that
 // updates from any chat (UpdateSpam/UpdateHam/RemoveSpam/RemoveHam/LoadSamples) become
 // visible to all detectors immediately. The internal mutex protects all fields.
+//
+// Lock-order invariant: callers MUST acquire Detector.lock before SamplesModel.lock when
+// both are needed. SamplesModel never calls back into Detector.
 type SamplesModel struct {
-	cls            classifier
-	tokSpam        []map[string]int
-	stops          []string
-	excluded       map[string]struct{}
-	lock           sync.RWMutex
+	cls      classifier
+	tokSpam  []map[string]int
+	stops    []string
+	excluded map[string]struct{}
+	lock     sync.RWMutex
 }
 
 // NewSamplesModel creates an empty model with a freshly initialised classifier.
@@ -122,29 +142,44 @@ func NewSamplesModel() *SamplesModel {
 	}
 }
 
-// classifierStats is a small read-only view used in tests.
-type classifierStats struct {
-	AllDocs int
-}
-
-// classifierStats returns a snapshot of classifier state for diagnostics/tests.
-func (m *SamplesModel) classifierStats() classifierStats {
+// classifierAllDocs returns the classifier's total learned-document count under read lock.
+func (m *SamplesModel) classifierAllDocs() int {
 	m.lock.RLock()
 	defer m.lock.RUnlock()
-	return classifierStats{AllDocs: m.cls.nAllDocument}
+	return m.cls.nAllDocument
 }
 
-// tokenizedSpam returns a snapshot of tokenized spam samples (test helper).
-func (m *SamplesModel) tokenizedSpam() []map[string]int { m.lock.RLock(); defer m.lock.RUnlock(); return m.tokSpam }
+// classifierReady reports whether the classifier has documents in both ham and spam classes.
+func (m *SamplesModel) classifierReady() bool {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	return m.cls.nAllDocument > 0 &&
+		m.cls.nDocumentByClass["ham"] > 0 && m.cls.nDocumentByClass["spam"] > 0
+}
 
-// stopWords returns a snapshot of stop words (test helper).
-func (m *SamplesModel) stopWords() []string { m.lock.RLock(); defer m.lock.RUnlock(); return m.stops }
+// tokenizedSpamLen returns the number of tokenized spam samples loaded.
+func (m *SamplesModel) tokenizedSpamLen() int {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	return len(m.tokSpam)
+}
 
-// excludedTokens returns a snapshot of excluded tokens (test helper).
-func (m *SamplesModel) excludedTokens() map[string]struct{} { m.lock.RLock(); defer m.lock.RUnlock(); return m.excluded }
+// stopWordsLen returns the number of loaded stop words.
+func (m *SamplesModel) stopWordsLen() int {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	return len(m.stops)
+}
+
+// excludedTokensLen returns the number of excluded tokens.
+func (m *SamplesModel) excludedTokensLen() int {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	return len(m.excluded)
+}
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Run, expect pass**
 
 ```bash
 go test -race ./lib/tgspam/ -run TestNewSamplesModel -v
@@ -156,25 +191,29 @@ Expected: PASS.
 
 ```bash
 git add lib/tgspam/samples_model.go lib/tgspam/samples_model_test.go
-git commit -m "Add SamplesModel skeleton for shared classifier state"
+git commit -m "Add SamplesModel skeleton with classifier+tokens+stops+excluded"
 ```
 
 ---
 
-## Task 2: Add `Reset` to `SamplesModel`
+## Task 2: Add `Reset` and `tokenize` methods to `SamplesModel`
+
+`tokenize` is moved off `Detector` because it reads `excluded` and we want a clean lock contract. Two flavours:
+
+- `tokenize(s)` — public, takes its own RLock. Use from any caller.
+- `tokenizeUnlocked(s)` — private, **assumes the write lock is already held**. Use only from inside `LoadSamples` / `updateSample` / `removeSample`. The "Unlocked" suffix is a convention warning future readers.
 
 **Files:**
 - Modify: `lib/tgspam/samples_model.go`
 - Modify: `lib/tgspam/samples_model_test.go`
 
-- [ ] **Step 1: Write the failing test for `Reset`**
+- [ ] **Step 1: Write failing test for `Reset`**
 
 Append to `lib/tgspam/samples_model_test.go`:
 
 ```go
 func TestSamplesModel_Reset(t *testing.T) {
 	m := NewSamplesModel()
-	// seed some state directly via internals
 	m.lock.Lock()
 	m.tokSpam = []map[string]int{{"buy": 1}}
 	m.stops = []string{"viagra"}
@@ -183,28 +222,57 @@ func TestSamplesModel_Reset(t *testing.T) {
 
 	m.Reset()
 
-	assert.Empty(t, m.tokenizedSpam())
-	assert.Empty(t, m.stopWords())
-	assert.Empty(t, m.excludedTokens())
-	assert.Equal(t, 0, m.classifierStats().AllDocs)
+	assert.Equal(t, 0, m.tokenizedSpamLen())
+	assert.Equal(t, 0, m.stopWordsLen())
+	assert.Equal(t, 0, m.excludedTokensLen())
+	assert.Equal(t, 0, m.classifierAllDocs())
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Write failing test for `tokenize`**
 
-```bash
-go test -race ./lib/tgspam/ -run TestSamplesModel_Reset -v
+Append:
+
+```go
+func TestSamplesModel_Tokenize(t *testing.T) {
+	m := NewSamplesModel()
+	// excluded tokens should be filtered out of the tokenize result
+	m.lock.Lock()
+	m.excluded = map[string]struct{}{"the": {}, "and": {}}
+	m.lock.Unlock()
+
+	got := m.tokenize("the quick brown fox and the lazy dog")
+	// "the" and "and" excluded; "quick", "brown", "fox", "lazy", "dog" remain
+	assert.NotContains(t, got, "the")
+	assert.NotContains(t, got, "and")
+	assert.Contains(t, got, "quick")
+	assert.Contains(t, got, "brown")
+	assert.Contains(t, got, "fox")
+	assert.Contains(t, got, "lazy")
+	assert.Contains(t, got, "dog")
+}
 ```
 
-Expected: `m.Reset undefined`.
+- [ ] **Step 3: Run, expect compile/test failure**
 
-- [ ] **Step 3: Implement `Reset`**
+```bash
+go test -race ./lib/tgspam/ -run "TestSamplesModel_Reset|TestSamplesModel_Tokenize" -v
+```
+
+Expected: `Reset undefined`, `tokenize undefined`.
+
+- [ ] **Step 4: Implement `Reset` and `tokenize`/`tokenizeUnlocked`**
+
+The current `tokenize` body in `lib/tgspam/detector.go` (around line 850) is the source of truth. Read it carefully — do **not** invent a new tokenizer. Then port that exact logic into two methods on `SamplesModel`.
 
 Append to `lib/tgspam/samples_model.go`:
 
 ```go
 // Reset clears all derived state (classifier, tokenized samples, stop words, excluded tokens).
-// Holds the write lock for the duration of the reset.
+// Holds the write lock for the duration.
+//
+// In multi-chat mode where multiple Detectors share one SamplesModel by reference,
+// Reset wipes state for all of them. Coordinate accordingly at the caller layer.
 func (m *SamplesModel) Reset() {
 	m.lock.Lock()
 	defer m.lock.Unlock()
@@ -213,39 +281,64 @@ func (m *SamplesModel) Reset() {
 	m.stops = []string{}
 	m.excluded = map[string]struct{}{}
 }
+
+// tokenize splits a string into a token map, excluding tokens listed in the model's
+// excluded set. Takes its own read lock; safe to call from any context except inside
+// a write-locked section (use tokenizeUnlocked for that).
+func (m *SamplesModel) tokenize(inp string) map[string]int {
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	return m.tokenizeUnlocked(inp)
+}
+
+// tokenizeUnlocked is the lock-free variant. Caller MUST already hold m.lock
+// (read or write); using it from outside a critical section races with mutators.
+// The body is the same algorithm as the original Detector.tokenize.
+func (m *SamplesModel) tokenizeUnlocked(inp string) map[string]int {
+	// Port the exact body of the existing detector.tokenize here.
+	// Reference: lib/tgspam/detector.go (the tokenize method) — copy line-for-line,
+	// replacing `d.excludedTokens` with `m.excluded`.
+	// Do not invent or simplify; preserve any rune handling, case folding, and
+	// punctuation stripping exactly.
+	res := map[string]int{}
+	// (paste the loop body verbatim from current detector.go tokenize, with the
+	//  excluded-token check using m.excluded)
+	_ = inp
+	return res
+}
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+**Important:** the placeholder body above is INSUFFICIENT. The implementer must read `lib/tgspam/detector.go` lines around 850 and copy the real tokenize body verbatim into `tokenizeUnlocked`, swapping `d.excludedTokens` for `m.excluded`. The TestSamplesModel_Tokenize test verifies correctness; it WILL fail with the placeholder above.
+
+- [ ] **Step 5: Run tests, iterate until both pass**
 
 ```bash
-go test -race ./lib/tgspam/ -run TestSamplesModel_Reset -v
+go test -race ./lib/tgspam/ -run "TestSamplesModel_Reset|TestSamplesModel_Tokenize" -v
 ```
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add lib/tgspam/samples_model.go lib/tgspam/samples_model_test.go
-git commit -m "Add Reset method to SamplesModel"
+git commit -m "Add Reset and tokenize methods to SamplesModel"
 ```
 
 ---
 
-## Task 3: Wire `SamplesModel` into `Detector` (preserving behavior)
+## Task 3: Add `model` field to `Detector` + new `NewDetectorWithModel` constructor
 
-This is the central refactor. We replace four `Detector` fields with one `*SamplesModel` pointer and route every read/write through it. The existing `Detector.lock` continues to guard per-Detector state (`approvedUsers`, history queues, etc.). The `SamplesModel` has its own mutex, so the locking discipline becomes: **acquire `Detector.lock` for per-Detector state, acquire `model.lock` for shared model state, never hold one while waiting on the other**.
+This task changes the struct definition and adds the new constructor — but does **not yet** route reads/writes through it. After this task the build will fail because old field accesses still exist; that's OK — Tasks 4-7 fix them piece by piece.
 
 **Files:**
 - Modify: `lib/tgspam/detector.go`
 
-- [ ] **Step 1: Add `model` field and remove old fields**
+- [ ] **Step 1: Update `Detector` struct definition**
 
-In `lib/tgspam/detector.go`, change the `Detector` struct definition (around line 37) so the four old fields disappear and `model` is added:
+In `lib/tgspam/detector.go` around line 37:
 
 ```go
-// Detector is a spam detector, thread-safe.
-// It uses a set of checks to determine if a message is spam, and also keeps a list of approved users.
 type Detector struct {
 	Config
 	model             *SamplesModel
@@ -269,15 +362,15 @@ type Detector struct {
 }
 ```
 
-Removed: `classifier`, `tokenizedSpam`, `stopWords`, `excludedTokens` (now inside `model`).
+Removed: `classifier`, `tokenizedSpam`, `stopWords`, `excludedTokens`. Added: `model`.
 
-- [ ] **Step 2: Update `NewDetector` to allocate a `SamplesModel`**
+- [ ] **Step 2: Update `NewDetector` and add `NewDetectorWithModel`**
 
-Replace the `NewDetector` body (around line 187) with:
+Replace the body of `NewDetector` (around line 187) with:
 
 ```go
 // NewDetector makes a new Detector with the given config and a fresh private SamplesModel.
-// To share a SamplesModel across detectors, use NewDetectorWithModel.
+// To share a SamplesModel across detectors (e.g. multi-chat support), use NewDetectorWithModel.
 func NewDetector(p Config) *Detector {
 	return NewDetectorWithModel(p, NewSamplesModel())
 }
@@ -287,6 +380,9 @@ func NewDetector(p Config) *Detector {
 // RemoveHam, Reset, classification, similarity, stop-word check) operate on the
 // shared model. Per-Detector state (approved users, duplicate detection, reaction
 // detection, history queues, LLM clients) remains private to this Detector.
+//
+// IMPORTANT: calling Detector.Reset() on a Detector built with a shared model wipes
+// the shared state for ALL detectors holding that model. Coordinate at the caller layer.
 func NewDetectorWithModel(p Config, model *SamplesModel) *Detector {
 	if model == nil {
 		model = NewSamplesModel()
@@ -314,65 +410,101 @@ func NewDetectorWithModel(p Config, model *SamplesModel) *Detector {
 }
 ```
 
-- [ ] **Step 3: Route all reads of the shared state through `model`**
-
-Find every read of `d.classifier`, `d.tokenizedSpam`, `d.stopWords`, `d.excludedTokens` in `lib/tgspam/detector.go` and replace as follows. Each replacement must hold `d.model.lock` only — release `d.lock` before acquiring it where needed.
-
-Pattern: replace `d.classifier.XYZ` with a helper that takes the model's read lock.
-
-Add these helpers to `lib/tgspam/detector.go` (place them near the bottom, before the closing of the file):
-
-```go
-// modelClassifierReady returns true when the shared classifier has trained docs in both classes.
-func (d *Detector) modelClassifierReady() bool {
-	d.model.lock.RLock()
-	defer d.model.lock.RUnlock()
-	return d.model.cls.nAllDocument > 0 &&
-		d.model.cls.nDocumentByClass["ham"] > 0 && d.model.cls.nDocumentByClass["spam"] > 0
-}
-
-// modelTokenizedSpamCount returns the number of tokenized spam samples currently loaded.
-func (d *Detector) modelTokenizedSpamCount() int {
-	d.model.lock.RLock()
-	defer d.model.lock.RUnlock()
-	return len(d.model.tokSpam)
-}
-
-// modelStopWordsCount returns the number of stop words currently loaded.
-func (d *Detector) modelStopWordsCount() int {
-	d.model.lock.RLock()
-	defer d.model.lock.RUnlock()
-	return len(d.model.stops)
-}
-```
-
-Then replace each callsite found via:
+- [ ] **Step 3: Verify the build now fails (expected)**
 
 ```bash
-grep -n 'd\.classifier\|d\.tokenizedSpam\|d\.stopWords\|d\.excludedTokens' lib/tgspam/detector.go
+go build ./lib/tgspam/...
 ```
 
-For each match (the grep at top of plan listed them), apply the appropriate transformation:
+Expected: many errors of the form `d.classifier undefined`, `d.tokenizedSpam undefined`, etc. — one per remaining old-field reference. Capture the full list with:
 
-- `len(d.stopWords) > 0` (line ~244) → `d.modelStopWordsCount() > 0`
-- `len(d.tokenizedSpam) > 0` (line ~302) → `d.modelTokenizedSpamCount() > 0`
-- `d.classifier.nAllDocument > 0 && d.classifier.nDocumentByClass["ham"] > 0 && d.classifier.nDocumentByClass["spam"] > 0` (lines ~308-309) → `d.modelClassifierReady()`
-- Inside `Reset` (lines ~478-482): replace the four assignments with a single `d.model.Reset()`.
-- Inside `LoadSamples` (lines ~688-722): replace direct field access with reads/writes through `d.model.lock` (see Step 4).
-- Inside `LoadStopWords` (lines ~731-735): replace `d.stopWords = ...` with `d.model.lock.Lock(); d.model.stops = ...; d.model.lock.Unlock()`.
-- Inside `updateSample` (lines ~775-780): operate on `d.model.cls` and `d.model.tokSpam` under `d.model.lock`.
-- Inside `removeSample` (around line 787): same.
-- Inside `isSpamClassified`, `isSpamSimilarityHigh`, `isStopWord`: take `d.model.lock.RLock()` for the duration of the read.
+```bash
+go build ./lib/tgspam/... 2>&1 | grep -E 'd\.(classifier|tokenizedSpam|stopWords|excludedTokens)' | head -40
+```
 
-Apply each replacement individually, running the test suite between each to keep the diff small and easy to bisect if something breaks.
+This list drives Tasks 4 and 5.
 
-- [ ] **Step 4: Rewrite `LoadSamples` to operate on the shared model**
+- [ ] **Step 4: Do NOT commit yet** — leave the broken state for Task 4 to fix immediately. Tasks 3-6 share an in-progress diff and only commit at the end of Task 6 once tests are green again.
 
-Find `LoadSamples` (around line 684) and replace its body so all four shared-state mutations happen inside one critical section on `d.model.lock`. The new body holds the model's write lock around the whole operation:
+This deviates from "commit per task" but is necessary because the refactor straddles many methods. Phase 1's Done definition still requires green tests at the end.
+
+---
+
+## Task 4: Migrate read paths to `d.model`
+
+Replace every `d.classifier.*`, `d.tokenizedSpam`, `d.stopWords`, `d.excludedTokens` *read* in `detector.go` with the model equivalent.
+
+**Files:**
+- Modify: `lib/tgspam/detector.go`
+
+- [ ] **Step 1: Migrate `Check` method (around line 215)**
+
+In the existing `Check`:
+
+- `len(d.stopWords) > 0` → `d.model.stopWordsLen() > 0`
+- `len(d.tokenizedSpam) > 0` → `d.model.tokenizedSpamLen() > 0`
+- The `classifierReady := d.classifier.nAllDocument > 0 && ...` block → `classifierReady := d.model.classifierReady()`
+
+- [ ] **Step 2: Migrate `isSpamClassified` (around line 1007)**
+
+The method calls `d.classifier.classify(tokens)` (or similar). Wrap that whole operation under `d.model.lock.RLock()` so the classify call sees a consistent classifier snapshot:
 
 ```go
-// LoadSamples loads spam samples, ham samples, and excluded tokens into the shared SamplesModel.
-// Writes are atomic with respect to other callers of the same model.
+func (d *Detector) isSpamClassified(msg string) spamcheck.Response {
+	d.model.lock.RLock()
+	defer d.model.lock.RUnlock()
+	tokens := d.model.tokenizeUnlocked(msg)
+	// ... existing classification logic, but reading d.model.cls instead of d.classifier ...
+}
+```
+
+Read the original method to see exactly what to port. Don't invent.
+
+- [ ] **Step 3: Migrate `isSpamSimilarityHigh` (around line 875)**
+
+Same pattern: take `d.model.lock.RLock()` for the duration so `tokenize` + `tokSpam` reads are atomic:
+
+```go
+func (d *Detector) isSpamSimilarityHigh(msg string) spamcheck.Response {
+	d.model.lock.RLock()
+	defer d.model.lock.RUnlock()
+	msgTokenized := d.model.tokenizeUnlocked(msg)
+	// ... existing similarity logic, replacing d.tokenizedSpam with d.model.tokSpam ...
+}
+```
+
+- [ ] **Step 4: Migrate `isStopWord` (around line 1029)**
+
+Take `d.model.lock.RLock()` and read `d.model.stops` instead of `d.stopWords`:
+
+```go
+func (d *Detector) isStopWord(msg string, req spamcheck.Request) spamcheck.Response {
+	d.model.lock.RLock()
+	defer d.model.lock.RUnlock()
+	// ... existing logic with d.stopWords replaced by d.model.stops ...
+}
+```
+
+- [ ] **Step 5: Build, expect remaining failures only on write paths**
+
+```bash
+go build ./lib/tgspam/... 2>&1 | grep -E 'd\.(classifier|tokenizedSpam|stopWords|excludedTokens)' | head
+```
+
+Expected: errors only inside `LoadSamples`, `LoadStopWords`, `Reset`, `updateSample`, `removeSample`, `buildDocs`. If anything else still references old fields, fix it now.
+
+---
+
+## Task 5: Migrate write paths to `d.model`
+
+**Files:**
+- Modify: `lib/tgspam/detector.go`
+
+- [ ] **Step 1: Rewrite `LoadSamples` (around line 684)**
+
+Hold the model write lock for the whole method body. Use `d.model.tokenizeUnlocked` (caller already holds the lock, public `tokenize` would deadlock):
+
+```go
 func (d *Detector) LoadSamples(exclReader io.Reader, spamReaders, hamReaders []io.Reader) (LoadResult, error) {
 	d.model.lock.Lock()
 	defer d.model.lock.Unlock()
@@ -389,22 +521,22 @@ func (d *Detector) LoadSamples(exclReader io.Reader, spamReaders, hamReaders []i
 
 	docs := []document{}
 	for token := range d.readerIterator(spamReaders...) {
-		tokens := d.tokenize(token) // tokenize is pure; no lock needed
+		tokens := d.model.tokenizeUnlocked(token)
 		d.model.tokSpam = append(d.model.tokSpam, tokens)
 		toks := make([]string, 0, len(tokens))
 		for k := range tokens {
 			toks = append(toks, k)
 		}
-		docs = append(docs, document{class: "spam", tokens: toks})
+		docs = append(docs, document{spamClass: ClassSpam, tokens: toks})
 		lr.SpamSamples++
 	}
 	for token := range d.readerIterator(hamReaders...) {
-		tokens := d.tokenize(token)
+		tokens := d.model.tokenizeUnlocked(token)
 		toks := make([]string, 0, len(tokens))
 		for k := range tokens {
 			toks = append(toks, k)
 		}
-		docs = append(docs, document{class: "ham", tokens: toks})
+		docs = append(docs, document{spamClass: ClassHam, tokens: toks})
 		lr.HamSamples++
 	}
 
@@ -413,29 +545,167 @@ func (d *Detector) LoadSamples(exclReader io.Reader, spamReaders, hamReaders []i
 }
 ```
 
-Note: `d.tokenize` reads `d.model.excluded`. To avoid deadlock, `tokenize` must NOT take `d.model.lock` itself. Audit `tokenize` (around line 850) — it currently reads `d.excludedTokens`. Update it to read directly from `d.model.excluded` *without* locking, on the assumption that callers (LoadSamples, updateSample, removeSample, isSpamSimilarityHigh) already hold `d.model.lock` (read or write). Document this contract:
+Note: `document` literal uses `spamClass: ClassSpam`/`ClassHam` per the actual definition in `lib/tgspam/classifier.go:21` and `lib/tgspam/detector.go:718`. **Verify this is still the form** by reading the existing code before pasting.
+
+- [ ] **Step 2: Rewrite `LoadStopWords` (around line 727)**
 
 ```go
-// tokenize splits a string into a token map. The caller MUST already hold d.model.lock
-// (read or write) because tokenize reads d.model.excluded directly.
-func (d *Detector) tokenize(inp string) map[string]int {
-	// (existing body, but replace d.excludedTokens with d.model.excluded)
+func (d *Detector) LoadStopWords(readers ...io.Reader) (LoadResult, error) {
+	d.model.lock.Lock()
+	defer d.model.lock.Unlock()
+	d.model.stops = []string{}
+	for t := range d.readerIterator(readers...) {
+		d.model.stops = append(d.model.stops, strings.ToLower(t))
+	}
+	return LoadResult{StopWords: len(d.model.stops)}, nil
 }
 ```
 
-- [ ] **Step 5: Run the existing detector test suite**
+- [ ] **Step 3: Rewrite `Reset` (around line 474)**
+
+`Detector.Reset` currently clears both shared state and per-Detector state. Preserve that: delegate shared-state clearing to `d.model.Reset()`, keep per-Detector clearing inline. Lock-order invariant: take `d.lock` first, then `d.model.lock` (via `Reset`):
+
+```go
+func (d *Detector) Reset() {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	d.model.Reset()              // shared state — wipes for all detectors holding this model
+	d.approvedUsers = map[string]approved.UserInfo{}
+	// reset any other per-detector state the original method touched (LLM history, etc.)
+}
+```
+
+Read the original `Reset` body to see what per-detector state it cleared (e.g., LLM history, samples updaters references) and preserve those clears.
+
+- [ ] **Step 4: Rewrite `updateSample` and `removeSample` (around lines 760-810)**
+
+Both methods mutate `d.classifier` and `d.tokenizedSpam`. Move those mutations inside `d.model.lock.Lock()` block:
+
+```go
+func (d *Detector) updateSample(msg string, upd SampleUpdater, sc spamClass) error {
+	if upd == nil {
+		return errors.New("sample updater is not set")
+	}
+	if err := upd.Append(msg); err != nil {
+		return fmt.Errorf("can't update samples: %w", err)
+	}
+	d.model.lock.Lock()
+	defer d.model.lock.Unlock()
+	tokens := d.model.tokenizeUnlocked(msg)
+	if sc == ClassSpam {
+		d.model.tokSpam = append(d.model.tokSpam, tokens)
+	}
+	toks := make([]string, 0, len(tokens))
+	for k := range tokens {
+		toks = append(toks, k)
+	}
+	d.model.cls.learn(document{spamClass: sc, tokens: toks})
+	return nil
+}
+```
+
+`removeSample` — symmetric. Read the original to preserve exact semantics.
+
+- [ ] **Step 5: Update `buildDocs` if it references old fields**
+
+`buildDocs` at line 811 reads `d.excludedTokens` indirectly via `d.tokenize`. After moving `tokenize` to the model, `buildDocs` either:
+
+- becomes a thin wrapper that calls `d.model.tokenize(msg)` (public, takes its own RLock), OR
+- gets inlined where it's used.
+
+Pick whichever keeps the diff smallest. Verify caller contract — if `buildDocs` is called from inside `updateSample` (which holds the write lock), use `tokenizeUnlocked`; otherwise use `tokenize`.
+
+- [ ] **Step 6: Build clean**
+
+```bash
+go build ./lib/tgspam/...
+```
+
+Expected: success. If any errors remain, run:
+
+```bash
+grep -n 'd\.classifier\|d\.tokenizedSpam\|d\.stopWords\|d\.excludedTokens' lib/tgspam/detector.go
+```
+
+Expected: empty. Fix any matches and rebuild.
+
+- [ ] **Step 7: Run tests — many will fail because detector_test.go still uses old fields**
 
 ```bash
 go test -race ./lib/tgspam/ -count=1
 ```
 
-Expected: PASS, same count as in Pre-flight 2. If anything fails, the most likely culprits are:
-- A missed callsite still referencing `d.classifier` / `d.tokenizedSpam` / `d.stopWords` / `d.excludedTokens` — re-run the grep and fix.
-- A double-locking deadlock in `LoadSamples`/`updateSample` interacting with `tokenize` — verify `tokenize` does not lock.
+Expected: compile errors in `detector_test.go`. That's fine — Task 6 fixes them.
 
-Iterate until green.
+---
 
-- [ ] **Step 6: Lint clean**
+## Task 6: Migrate `detector_test.go` field accesses + benchmark
+
+24+ existing test sites read `d.classifier.nAllDocument`, `d.tokenizedSpam`, `d.classifier.learningResults`, etc. These tests are correct in intent — they verify the model state — but need to address the new field path. `BenchmarkTokenize` (and any other benchmark that constructs `Detector{...}` literal) needs the same treatment.
+
+**Files:**
+- Modify: `lib/tgspam/detector_test.go`
+
+- [ ] **Step 1: List every site that needs updating**
+
+```bash
+grep -n 'd\.classifier\|d\.tokenizedSpam\|d\.stopWords\|d\.excludedTokens\|excludedTokens:\|classifier:' lib/tgspam/detector_test.go
+```
+
+Expected: 24+ matches. Capture the list.
+
+- [ ] **Step 2: Replace each access mechanically**
+
+For every match:
+
+| Old | New |
+|---|---|
+| `d.classifier.reset()` | `d.model.cls.reset()` (test takes model lock if needed) |
+| `d.classifier.nAllDocument` | `d.model.cls.nAllDocument` |
+| `d.classifier.nDocumentByClass[...]` | `d.model.cls.nDocumentByClass[...]` |
+| `d.classifier.learningResults` | `d.model.cls.learningResults` |
+| `d.tokenizedSpam` | `d.model.tokSpam` |
+| `d.tokenizedSpam = nil` | `d.model.tokSpam = nil` |
+| `d.stopWords` | `d.model.stops` |
+| `d.excludedTokens` | `d.model.excluded` |
+| `&Detector{excludedTokens: map[string]struct{}{...}}` | `&Detector{model: &SamplesModel{excluded: map[string]struct{}{...}}}` |
+
+For tests that construct a `Detector` via composite literal AND populate model fields (e.g., `TestDetector_buildDocs`), the right rewrite is:
+
+```go
+m := NewSamplesModel()
+m.lock.Lock()
+m.excluded = map[string]struct{}{"the": {}, "and": {}}
+m.lock.Unlock()
+d := NewDetectorWithModel(Config{}, m)
+```
+
+Use `NewDetectorWithModel` over composite literals where the test wants a fully wired Detector.
+
+For tests that read state immediately after a mutation (no concurrent goroutine), no extra locking is needed — Go's memory model guarantees the read sees the write within the same goroutine.
+
+- [ ] **Step 3: Find and update the benchmark**
+
+```bash
+grep -n 'BenchmarkTokenize\|Detector{.*excludedTokens' lib/tgspam/
+```
+
+If the benchmark constructs `Detector{excludedTokens: ...}`, rewrite it the same way as the tests above (use `NewDetectorWithModel` or directly seed the model).
+
+- [ ] **Step 4: Build + run all detector tests**
+
+```bash
+go build ./lib/tgspam/...
+go test -race ./lib/tgspam/ -count=1
+```
+
+Expected: all tests pass — including the original 100% of the suite from Pre-flight 2.
+
+If any test fails:
+1. If it's an assertion mismatch — the refactor accidentally changed behavior. Revert the failing piece, investigate.
+2. If it's a deadlock or race — the locking discipline was violated. Re-check Task 4/5 changes, especially nested locks.
+
+- [ ] **Step 5: Lint clean**
 
 ```bash
 golangci-lint run ./lib/tgspam/...
@@ -443,151 +713,57 @@ golangci-lint run ./lib/tgspam/...
 
 Expected: clean.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit (covers Tasks 3-6 — first checkpoint of the refactor)**
 
 ```bash
-git add lib/tgspam/detector.go
-git commit -m "Move classifier/tokenized/stops/excluded into SamplesModel"
+git add lib/tgspam/detector.go lib/tgspam/detector_test.go
+git commit -m "Move classifier/tokens/stops/excluded into SamplesModel"
 ```
 
 ---
 
-## Task 4: Test that two `Detector`s sharing a model see updates from each other
+## Task 7: New test — shared `SamplesModel` propagates updates
 
-This is the headline test for Phase 1: it proves the multi-chat foundation actually works.
+This is the headline test for Phase 1: it proves the multi-chat foundation works.
 
 **Files:**
 - Modify: `lib/tgspam/detector_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write failing test**
 
 Append to `lib/tgspam/detector_test.go`:
 
 ```go
 func TestDetector_SharedSamplesModel_UpdatesPropagate(t *testing.T) {
 	model := NewSamplesModel()
-
-	// two detectors, same shared model, distinct configs are fine
 	cfg := Config{MinMsgLen: 1, MinSpamProbability: 0.5}
 	d1 := NewDetectorWithModel(cfg, model)
 	d2 := NewDetectorWithModel(cfg, model)
 
-	// seed both classes with some baseline so the classifier is "ready" enough.
-	// LoadSamples on d1 alone should populate the shared model that d2 also sees.
 	spam := bytes.NewBufferString("buy cheap viagra now\nclick here to win cash\n")
 	ham := bytes.NewBufferString("the weather is lovely today\nlet's discuss the project plan\n")
 	excl := bytes.NewBufferString("")
 	_, err := d1.LoadSamples(excl, []io.Reader{spam}, []io.Reader{ham})
 	require.NoError(t, err)
 
-	// d2 immediately sees the loaded model
-	require.True(t, d2.modelClassifierReady(), "d2 should observe shared classifier readiness after d1 loads samples")
-	require.Greater(t, d2.modelTokenizedSpamCount(), 0, "d2 should see tokenized spam samples loaded by d1")
+	require.True(t, model.classifierReady(), "shared classifier ready after d1 loads samples")
+	require.Greater(t, model.tokenizedSpamLen(), 0, "shared model has tokenized spam after d1 loads samples")
 
-	// adding a new spam sample on d1 must be visible to d2's classifier
-	spamSamples := d2.modelTokenizedSpamCount()
+	before := model.tokenizedSpamLen()
 	require.NoError(t, d1.UpdateSpam("free crypto airdrop dm me"))
-	assert.Equal(t, spamSamples+1, d2.modelTokenizedSpamCount(),
-		"UpdateSpam on d1 must propagate to d2 via shared model")
+	assert.Equal(t, before+1, model.tokenizedSpamLen(),
+		"UpdateSpam on d1 must propagate to the shared model that d2 also sees")
+
+	// d2's view of the model is identical because they share the pointer
+	assert.Equal(t, model.tokenizedSpamLen(), d2.model.tokenizedSpamLen())
+	assert.Equal(t, model.classifierReady(), d2.model.classifierReady())
 }
 ```
 
-You'll need to add `"bytes"` and `"io"` to the imports of `detector_test.go` if not already present.
-
-- [ ] **Step 2: Run the test**
+- [ ] **Step 2: Run, expect PASS (state already shared via Task 6)**
 
 ```bash
 go test -race ./lib/tgspam/ -run TestDetector_SharedSamplesModel_UpdatesPropagate -v
-```
-
-Expected: PASS (the model is already shared by reference because Task 3 made every read/write go through `d.model`). If FAIL, there is a missed callsite still using a per-Detector field — fix and re-run.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add lib/tgspam/detector_test.go
-git commit -m "Test SamplesModel updates propagate across detectors"
-```
-
----
-
-## Task 5: Test that per-Detector state stays isolated
-
-**Files:**
-- Modify: `lib/tgspam/detector_test.go`
-
-- [ ] **Step 1: Write the failing test**
-
-Append to `lib/tgspam/detector_test.go`:
-
-```go
-func TestDetector_SharedSamplesModel_PerDetectorStateIsolated(t *testing.T) {
-	model := NewSamplesModel()
-	cfg := Config{
-		MinMsgLen:          1,
-		FirstMessageOnly:   true,
-		FirstMessagesCount: 1,
-	}
-	d1 := NewDetectorWithModel(cfg, model)
-	d2 := NewDetectorWithModel(cfg, model)
-
-	// approve user on d1; d2 must NOT see them as approved
-	require.NoError(t, d1.AddApprovedUser(approved.UserInfo{UserID: "1001", UserName: "alice"}))
-	assert.True(t, d1.IsApprovedUser("1001"), "d1 should know its approved user")
-	assert.False(t, d2.IsApprovedUser("1001"), "d2 must not see approvals added to d1")
-
-	// duplicate detection state is also per-detector: trigger it on d1, verify d2 unaffected.
-	// (only meaningful when DuplicateDetection.Threshold > 0; default 0 means disabled, which
-	// still proves isolation: per-detector instances exist and don't share state.)
-	assert.NotSame(t, d1.duplicateDetector, d2.duplicateDetector,
-		"each detector must own its own duplicateDetector instance")
-	assert.NotSame(t, d1.reactionDetector, d2.reactionDetector,
-		"each detector must own its own reactionDetector instance")
-}
-```
-
-- [ ] **Step 2: Run the test**
-
-```bash
-go test -race ./lib/tgspam/ -run TestDetector_SharedSamplesModel_PerDetectorStateIsolated -v
-```
-
-Expected: PASS. If FAIL on the `IsApprovedUser` assertion, then Task 3 accidentally moved `approvedUsers` into the shared model — back it out.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add lib/tgspam/detector_test.go
-git commit -m "Test per-detector state isolation alongside shared model"
-```
-
----
-
-## Task 6: Test that the legacy `NewDetector` constructor stays single-instance
-
-**Files:**
-- Modify: `lib/tgspam/detector_test.go`
-
-- [ ] **Step 1: Write the test**
-
-Append to `lib/tgspam/detector_test.go`:
-
-```go
-func TestDetector_LegacyConstructor_PrivateModel(t *testing.T) {
-	cfg := Config{MinMsgLen: 1}
-	d1 := NewDetector(cfg)
-	d2 := NewDetector(cfg)
-
-	// each detector built via the legacy constructor must own a distinct SamplesModel.
-	assert.NotSame(t, d1.model, d2.model,
-		"NewDetector should allocate a fresh SamplesModel each time, preserving prior single-tenant behavior")
-}
-```
-
-- [ ] **Step 2: Run the test**
-
-```bash
-go test -race ./lib/tgspam/ -run TestDetector_LegacyConstructor_PrivateModel -v
 ```
 
 Expected: PASS.
@@ -596,12 +772,102 @@ Expected: PASS.
 
 ```bash
 git add lib/tgspam/detector_test.go
-git commit -m "Test NewDetector still allocates a private SamplesModel"
+git commit -m "Test shared SamplesModel updates propagate across detectors"
 ```
 
 ---
 
-## Task 7: Concurrent-safety smoke test for shared model
+## Task 8: New test — per-Detector state stays isolated (with non-zero thresholds)
+
+The previous draft tested isolation with default-config Detectors, where `duplicateDetector`/`reactionDetector` are `nil` (the constructors return nil when threshold == 0). `assert.NotSame(nil, nil)` would silently pass-or-fail unpredictably. Use non-zero thresholds so the constructors return real instances.
+
+**Files:**
+- Modify: `lib/tgspam/detector_test.go`
+
+- [ ] **Step 1: Write failing test**
+
+Append:
+
+```go
+func TestDetector_SharedSamplesModel_PerDetectorStateIsolated(t *testing.T) {
+	model := NewSamplesModel()
+	cfg := Config{
+		MinMsgLen:          1,
+		FirstMessageOnly:   true,
+		FirstMessagesCount: 1,
+		// non-zero so newDuplicateDetector/newReactionDetector return real instances:
+		DuplicateDetection: struct {
+			Threshold int
+			Window    time.Duration
+		}{Threshold: 3, Window: time.Minute},
+		ReactionSpam: struct {
+			MaxReactions int
+			Window       time.Duration
+		}{MaxReactions: 5, Window: time.Minute},
+	}
+	d1 := NewDetectorWithModel(cfg, model)
+	d2 := NewDetectorWithModel(cfg, model)
+
+	// approved-users isolation
+	require.NoError(t, d1.AddApprovedUser(approved.UserInfo{UserID: "1001", UserName: "alice"}))
+	assert.True(t, d1.IsApprovedUser("1001"), "d1 should know its approved user")
+	assert.False(t, d2.IsApprovedUser("1001"), "d2 must not see approvals added to d1")
+
+	// duplicate / reaction detectors are non-nil (config has non-zero thresholds) and distinct
+	require.NotNil(t, d1.duplicateDetector)
+	require.NotNil(t, d2.duplicateDetector)
+	assert.NotSame(t, d1.duplicateDetector, d2.duplicateDetector,
+		"each detector must own its own duplicateDetector instance")
+
+	require.NotNil(t, d1.reactionDetector)
+	require.NotNil(t, d2.reactionDetector)
+	assert.NotSame(t, d1.reactionDetector, d2.reactionDetector,
+		"each detector must own its own reactionDetector instance")
+}
+```
+
+The struct-literal anonymous types for `DuplicateDetection`/`ReactionSpam` must match the actual type definitions in `detector.go` Config. Verify by reading lines 136-144 of `detector.go` first.
+
+- [ ] **Step 2: Run, expect PASS**
+
+```bash
+go test -race ./lib/tgspam/ -run TestDetector_SharedSamplesModel_PerDetectorStateIsolated -v
+```
+
+Expected: PASS.
+
+- [ ] **Step 3: Add legacy-constructor isolation test**
+
+Append:
+
+```go
+func TestDetector_LegacyConstructor_PrivateModel(t *testing.T) {
+	cfg := Config{MinMsgLen: 1}
+	d1 := NewDetector(cfg)
+	d2 := NewDetector(cfg)
+	assert.NotSame(t, d1.model, d2.model,
+		"NewDetector should allocate a fresh SamplesModel each time, preserving prior single-tenant behavior")
+}
+```
+
+- [ ] **Step 4: Run**
+
+```bash
+go test -race ./lib/tgspam/ -run "TestDetector_SharedSamplesModel_PerDetectorStateIsolated|TestDetector_LegacyConstructor_PrivateModel" -v
+```
+
+Expected: both PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add lib/tgspam/detector_test.go
+git commit -m "Test per-detector isolation and legacy constructor private model"
+```
+
+---
+
+## Task 9: Concurrent-safety smoke test
 
 **Files:**
 - Modify: `lib/tgspam/samples_model_test.go`
@@ -617,7 +883,7 @@ func TestSamplesModel_ConcurrentReadWrite(t *testing.T) {
 	d1 := NewDetectorWithModel(cfg, m)
 	d2 := NewDetectorWithModel(cfg, m)
 
-	// 16 goroutines hammer UpdateSpam/UpdateHam on d1 while 16 read modelClassifierReady on d2.
+	// 16 goroutines hammer UpdateSpam on d1 while 16 read model state via d2.
 	const N = 16
 	var wg sync.WaitGroup
 	wg.Add(2 * N)
@@ -628,26 +894,25 @@ func TestSamplesModel_ConcurrentReadWrite(t *testing.T) {
 		}(i)
 		go func() {
 			defer wg.Done()
-			_ = d2.modelClassifierReady()
-			_ = d2.modelTokenizedSpamCount()
+			_ = d2.model.classifierReady()
+			_ = d2.model.tokenizedSpamLen()
 		}()
 	}
 	wg.Wait()
 
-	// classifier should have learned at least N docs (each UpdateSpam appends one)
-	assert.GreaterOrEqual(t, m.classifierStats().AllDocs, N)
+	assert.GreaterOrEqual(t, m.classifierAllDocs(), N)
 }
 ```
 
-Add `"fmt"` and `"sync"` imports to the test file if missing.
+Add `"fmt"` and `"sync"` imports if missing.
 
-- [ ] **Step 2: Run the test under the race detector**
+- [ ] **Step 2: Run under the race detector, multiple iterations**
 
 ```bash
 go test -race ./lib/tgspam/ -run TestSamplesModel_ConcurrentReadWrite -v -count=10
 ```
 
-Expected: PASS, no race detector warnings, across 10 iterations. If `-race` reports a data race, the most likely place is `tokenize` reading `d.model.excluded` without holding the lock when a caller forgot to hold it — re-audit per-callsite locking from Task 3.
+Expected: PASS for all 10 iterations, no race warnings.
 
 - [ ] **Step 3: Commit**
 
@@ -658,27 +923,33 @@ git commit -m "Add concurrent read/write race test for SamplesModel"
 
 ---
 
-## Task 8: Verify the rest of the codebase still builds and passes
+## Task 10: Final verification — grep, build, tests, lint, normalise
 
-The Detector refactor touches a lot of internal state. Other packages (`app/bot/spam.go`, `app/main.go`, `app/events/*`, `lib/tgspam/llm.go`, etc.) call into `Detector`. They don't reference the four moved fields directly, so they should compile unchanged — but verify.
+- [ ] **Step 1: Grep for stale field references in the package**
 
-- [ ] **Step 1: Build the whole module**
+```bash
+grep -rn 'd\.classifier\|d\.tokenizedSpam\|d\.stopWords\|d\.excludedTokens' lib/tgspam/
+```
+
+Expected: empty output. Any match indicates a missed migration — fix it.
+
+- [ ] **Step 2: Full module build**
 
 ```bash
 go build ./...
 ```
 
-Expected: clean. If anything fails to compile, it is touching the four removed fields directly (very unlikely for non-test code, but possible in tests). Patch up by routing through Detector methods.
+Expected: clean. If any non-`lib/tgspam` package fails, it touches the four removed fields directly (very unlikely for non-test code).
 
-- [ ] **Step 2: Run the full test suite**
+- [ ] **Step 3: Full module test suite**
 
 ```bash
 go test -race ./... -count=1
 ```
 
-Expected: every package passes. Capture the count, compare to Pre-flight 2.
+Expected: every package passes with the same or higher pass count than Pre-flight 2.
 
-- [ ] **Step 3: Lint clean**
+- [ ] **Step 4: Lint clean**
 
 ```bash
 golangci-lint run
@@ -686,28 +957,26 @@ golangci-lint run
 
 Expected: clean.
 
-- [ ] **Step 4: Normalise comments**
+- [ ] **Step 5: Normalise comments**
 
 ```bash
 command -v unfuck-ai-comments >/dev/null || go install github.com/umputun/unfuck-ai-comments@latest
 unfuck-ai-comments run --fmt --skip=mocks ./lib/tgspam/...
 ```
 
-Re-run tests + lint:
+Re-run tests + lint to confirm nothing was broken:
 
 ```bash
-go test -race ./lib/tgspam/... && golangci-lint run ./lib/tgspam/...
+go test -race ./lib/tgspam/... -count=1 && golangci-lint run ./lib/tgspam/...
 ```
 
-Expected: clean.
-
-- [ ] **Step 5: Commit any normalisation changes**
+- [ ] **Step 6: Commit any normalisation changes**
 
 ```bash
 git status --short
 ```
 
-If anything was modified by `unfuck-ai-comments`:
+If anything was modified:
 
 ```bash
 git add -A lib/tgspam/
@@ -724,27 +993,27 @@ After all tasks pass, verify against the spec (`docs/plans/2026-04-28-multi-chat
 
 | Spec requirement | Where it lands |
 |---|---|
-| Shared classifier pointer held by all per-chat Detectors | Task 3 (`Detector.model *SamplesModel`) |
-| `UpdateSpam`/`UpdateHam`/`ReloadSamples` propagate via shared state | Task 4 (`TestDetector_SharedSamplesModel_UpdatesPropagate`) |
-| Per-chat `approvedUsers`/`duplicateDetector`/`reactionDetector` isolated | Task 5 |
-| `NewDetector` preserves single-chat behavior for tests/CLI | Task 6 |
-| All existing tests pass | Task 8 |
+| Shared classifier (model) pointer held by all per-chat Detectors | Task 3 (`Detector.model *SamplesModel`) + Task 4-5 (state migrated) |
+| `UpdateSpam`/`UpdateHam`/`ReloadSamples` propagate via shared state | Task 7 (`TestDetector_SharedSamplesModel_UpdatesPropagate`) |
+| Per-chat `approvedUsers`/`duplicateDetector`/`reactionDetector` isolated | Task 8 |
+| `NewDetector` preserves single-chat behavior for tests/CLI | Tasks 3, 6, 8 |
+| All existing tests pass | Tasks 6, 10 |
+| Lock-order invariant documented | Architecture section + `SamplesModel` doc comment |
+| `Detector.Reset` semantics for shared model documented | `NewDetectorWithModel` doc comment + `SamplesModel.Reset` doc comment |
 
-Out of scope for Phase 1, deferred to Phase 2 (per-chat wiring) or Phase 3 (storage migration):
+Out of scope (deferred to Phase 2):
 - Wiring `RuntimeChatContext.Detector` in `app/main.go`.
-- Per-chat `SpamFilter` construction.
-- Storage `UNIQUE` constraints.
+- Per-chat `SpamFilter` construction in `app/`.
 - Anything in `app/events`, `app/webapi`, `app/config`.
-
-If Task 8 reveals a regression in another package, surface it here and stop — do not paper over it. Phase 1 must leave the suite green for downstream phases to make sense.
 
 ---
 
 ## Done definition
 
-- All seven Pre-flight + Task checklist boxes ticked.
-- `go test -race ./...` passes with the same or higher pass count than Pre-flight 2.
+- All Pre-flight + Task checkboxes ticked.
+- `grep -rn 'd\.classifier\|d\.tokenizedSpam\|d\.stopWords\|d\.excludedTokens' lib/tgspam/` returns empty.
+- `go test -race ./...` passes with the same or higher count than Pre-flight 2.
 - `golangci-lint run` clean.
-- The branch contains 7-8 small commits, one per task or sub-step, suitable for review.
+- Branch contains 7-10 commits, one per task or grouped checkpoint, suitable for review.
 
 After this plan is complete, the next plan (`2026-04-28-multi-chat-phase2-config-and-wiring.md`) introduces `ConfiguredChat`, `RuntimeChatContext`, `engine.WithGID`, and per-chat construction in `app/main.go`.
