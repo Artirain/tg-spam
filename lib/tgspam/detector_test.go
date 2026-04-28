@@ -3547,3 +3547,47 @@ func TestDetector_SharedSamplesModel_UpdatesPropagate(t *testing.T) {
 	assert.Equal(t, model.tokenizedSpamLen(), d2.model.tokenizedSpamLen())
 	assert.Equal(t, model.classifierReady(), d2.model.classifierReady())
 }
+
+func TestDetector_SharedSamplesModel_PerDetectorStateIsolated(t *testing.T) {
+	model := NewSamplesModel()
+	cfg := Config{
+		MinMsgLen:          1,
+		FirstMessageOnly:   true,
+		FirstMessagesCount: 1,
+		// non-zero so newDuplicateDetector/newReactionDetector return real instances:
+		DuplicateDetection: struct {
+			Threshold int
+			Window    time.Duration
+		}{Threshold: 3, Window: time.Minute},
+		ReactionSpam: struct {
+			MaxReactions int
+			Window       time.Duration
+		}{MaxReactions: 5, Window: time.Minute},
+	}
+	d1 := NewDetectorWithModel(cfg, model)
+	d2 := NewDetectorWithModel(cfg, model)
+
+	// approved-users isolation
+	require.NoError(t, d1.AddApprovedUser(approved.UserInfo{UserID: "1001", UserName: "alice"}))
+	assert.True(t, d1.IsApprovedUser("1001"), "d1 should know its approved user")
+	assert.False(t, d2.IsApprovedUser("1001"), "d2 must not see approvals added to d1")
+
+	// duplicate / reaction detectors are non-nil (config has non-zero thresholds) and distinct
+	require.NotNil(t, d1.duplicateDetector)
+	require.NotNil(t, d2.duplicateDetector)
+	assert.NotSame(t, d1.duplicateDetector, d2.duplicateDetector,
+		"each detector must own its own duplicateDetector instance")
+
+	require.NotNil(t, d1.reactionDetector)
+	require.NotNil(t, d2.reactionDetector)
+	assert.NotSame(t, d1.reactionDetector, d2.reactionDetector,
+		"each detector must own its own reactionDetector instance")
+}
+
+func TestDetector_LegacyConstructor_PrivateModel(t *testing.T) {
+	cfg := Config{MinMsgLen: 1}
+	d1 := NewDetector(cfg)
+	d2 := NewDetector(cfg)
+	assert.NotSame(t, d1.model, d2.model,
+		"NewDetector should allocate a fresh SamplesModel each time, preserving prior single-tenant behavior")
+}
