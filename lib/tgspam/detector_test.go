@@ -1232,11 +1232,11 @@ func TestDetector_CheckSimilarity(t *testing.T) {
 	lr, err := d.LoadSamples(strings.NewReader("xyz"), []io.Reader{spamSamples}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, LoadResult{ExcludedTokens: 1, SpamSamples: 2}, lr)
-	d.classifier.reset() // we don't need a classifier for this test
-	assert.Len(t, d.tokenizedSpam, 2)
-	t.Logf("%+v", d.tokenizedSpam)
-	assert.Equal(t, map[string]int{"win": 1, "free": 1, "iphone": 1}, d.tokenizedSpam[0])
-	assert.Equal(t, map[string]int{"lottery": 1, "prize": 1}, d.tokenizedSpam[1])
+	d.model.cls.reset() // we don't need a classifier for this test
+	assert.Len(t, d.model.tokSpam, 2)
+	t.Logf("%+v", d.model.tokSpam)
+	assert.Equal(t, map[string]int{"win": 1, "free": 1, "iphone": 1}, d.model.tokSpam[0])
+	assert.Equal(t, map[string]int{"lottery": 1, "prize": 1}, d.model.tokSpam[1])
 
 	tests := []struct {
 		name      string
@@ -1270,12 +1270,12 @@ func TestDetector_CheckClassifier(t *testing.T) {
 	lr, err := d.LoadSamples(strings.NewReader("xyz"), []io.Reader{spamSamples}, []io.Reader{hamsSamples})
 	require.NoError(t, err)
 	assert.Equal(t, LoadResult{ExcludedTokens: 1, SpamSamples: 2, HamSamples: 3}, lr)
-	d.tokenizedSpam = nil // we don't need tokenizedSpam samples for this test
-	assert.Equal(t, 5, d.classifier.nAllDocument)
+	d.model.tokSpam = nil // we don't need tokenizedSpam samples for this test
+	assert.Equal(t, 5, d.model.cls.nAllDocument)
 	exp := map[string]map[spamClass]int{"win": {"spam": 1}, "free": {"spam": 1}, "iphone": {"spam": 1}, "lottery": {"spam": 1},
 		"prize": {"spam": 1}, "hello": {"ham": 1}, "world": {"ham": 1}, "how": {"ham": 1}, "are": {"ham": 1}, "you": {"ham": 1},
 		"have": {"ham": 1}, "good": {"ham": 1}, "day": {"ham": 1}}
-	assert.Equal(t, exp, d.classifier.learningResults)
+	assert.Equal(t, exp, d.model.cls.learningResults)
 
 	tests := []struct {
 		name     string
@@ -1318,13 +1318,13 @@ func TestDetector_CheckClassifierNoHam(t *testing.T) {
 	lr, err := d.LoadSamples(strings.NewReader("xyz"), []io.Reader{spamSamples}, nil)
 	require.NoError(t, err)
 	assert.Equal(t, LoadResult{ExcludedTokens: 1, SpamSamples: 2, HamSamples: 0}, lr)
-	d.tokenizedSpam = nil // we don't need tokenizedSpam samples for this test
-	assert.Equal(t, 2, d.classifier.nAllDocument)
-	assert.Equal(t, 2, d.classifier.nDocumentByClass["spam"])
-	assert.Equal(t, 0, d.classifier.nDocumentByClass["ham"])
+	d.model.tokSpam = nil // we don't need tokenizedSpam samples for this test
+	assert.Equal(t, 2, d.model.cls.nAllDocument)
+	assert.Equal(t, 2, d.model.cls.nDocumentByClass["spam"])
+	assert.Equal(t, 0, d.model.cls.nDocumentByClass["ham"])
 	exp := map[string]map[spamClass]int{"win": {"spam": 1}, "free": {"spam": 1}, "iphone": {"spam": 1},
 		"lottery": {"spam": 1}, "prize": {"spam": 1}}
-	assert.Equal(t, exp, d.classifier.learningResults)
+	assert.Equal(t, exp, d.model.cls.learningResults)
 
 	tests := []string{
 		"Hello, how are you?",
@@ -2188,12 +2188,12 @@ func TestDetector_UpdateSpam(t *testing.T) {
 	lr, err := d.LoadSamples(strings.NewReader("xyz"), []io.Reader{spamSamples}, []io.Reader{hamsSamples})
 	require.NoError(t, err)
 	assert.Equal(t, LoadResult{ExcludedTokens: 1, SpamSamples: 2, HamSamples: 3}, lr)
-	d.tokenizedSpam = nil // we don't need tokenizedSpam samples for this test
-	assert.Equal(t, 5, d.classifier.nAllDocument)
+	d.model.tokSpam = nil // we don't need tokenizedSpam samples for this test
+	assert.Equal(t, 5, d.model.cls.nAllDocument)
 	exp := map[string]map[spamClass]int{"win": {"spam": 1}, "free": {"spam": 1}, "iphone": {"spam": 1}, "lottery": {"spam": 1},
 		"prize": {"spam": 1}, "hello": {"ham": 1}, "world": {"ham": 1}, "how": {"ham": 1}, "are": {"ham": 1}, "you": {"ham": 1},
 		"have": {"ham": 1}, "good": {"ham": 1}, "day": {"ham": 1}}
-	assert.Equal(t, exp, d.classifier.learningResults)
+	assert.Equal(t, exp, d.model.cls.learningResults)
 
 	msg := "another good world one iphone user writes good things day"
 	t.Run("initially a little bit ham", func(t *testing.T) {
@@ -2207,7 +2207,7 @@ func TestDetector_UpdateSpam(t *testing.T) {
 
 	err = d.UpdateSpam("another user writes")
 	require.NoError(t, err)
-	assert.Equal(t, 6, d.classifier.nAllDocument)
+	assert.Equal(t, 6, d.model.cls.nAllDocument)
 	assert.Len(t, upd.AppendCalls(), 1)
 
 	t.Run("after update mostly spam", func(t *testing.T) {
@@ -2235,12 +2235,12 @@ func TestDetector_UpdateHam(t *testing.T) {
 	lr, err := d.LoadSamples(strings.NewReader("xyz"), []io.Reader{spamSamples}, []io.Reader{hamsSamples})
 	require.NoError(t, err)
 	assert.Equal(t, LoadResult{ExcludedTokens: 1, SpamSamples: 2, HamSamples: 3}, lr)
-	d.tokenizedSpam = nil // we don't need tokenizedSpam samples for this test
-	assert.Equal(t, 5, d.classifier.nAllDocument)
+	d.model.tokSpam = nil // we don't need tokenizedSpam samples for this test
+	assert.Equal(t, 5, d.model.cls.nAllDocument)
 	exp := map[string]map[spamClass]int{"win": {"spam": 1}, "free": {"spam": 1}, "iphone": {"spam": 1}, "lottery": {"spam": 1},
 		"prize": {"spam": 1}, "hello": {"ham": 1}, "world": {"ham": 1}, "how": {"ham": 1}, "are": {"ham": 1}, "you": {"ham": 1},
 		"have": {"ham": 1}, "good": {"ham": 1}, "day": {"ham": 1}}
-	assert.Equal(t, exp, d.classifier.learningResults)
+	assert.Equal(t, exp, d.model.cls.learningResults)
 
 	msg := "another free good world one iphone user writes good things day"
 	t.Run("initially a little bit spam", func(t *testing.T) {
@@ -2254,7 +2254,7 @@ func TestDetector_UpdateHam(t *testing.T) {
 
 	err = d.UpdateHam("another writes things")
 	require.NoError(t, err)
-	assert.Equal(t, 6, d.classifier.nAllDocument)
+	assert.Equal(t, 6, d.model.cls.nAllDocument)
 	assert.Len(t, upd.AppendCalls(), 1)
 
 	t.Run("after update mostly ham", func(t *testing.T) {
@@ -2278,16 +2278,16 @@ func TestDetector_Reset(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, LoadResult{StopWords: 2}, sr)
 
-	assert.Equal(t, 5, d.classifier.nAllDocument)
-	assert.Len(t, d.tokenizedSpam, 2)
-	assert.Len(t, d.excludedTokens, 1)
-	assert.Len(t, d.stopWords, 2)
+	assert.Equal(t, 5, d.model.cls.nAllDocument)
+	assert.Len(t, d.model.tokSpam, 2)
+	assert.Len(t, d.model.excluded, 1)
+	assert.Len(t, d.model.stops, 2)
 
 	d.Reset()
-	assert.Equal(t, 0, d.classifier.nAllDocument)
-	assert.Empty(t, d.tokenizedSpam)
-	assert.Empty(t, d.excludedTokens)
-	assert.Empty(t, d.stopWords)
+	assert.Equal(t, 0, d.model.cls.nAllDocument)
+	assert.Empty(t, d.model.tokSpam)
+	assert.Empty(t, d.model.excluded)
+	assert.Empty(t, d.model.stops)
 }
 
 func TestDetector_FirstMessagesCount(t *testing.T) {
@@ -2529,23 +2529,23 @@ func TestDetector_LoadSamples(t *testing.T) {
 		assert.Equal(t, 3, lr.HamSamples)
 
 		// verify excluded tokens
-		assert.Contains(t, d.excludedTokens, "xyz")
+		assert.Contains(t, d.model.excluded, "xyz")
 
 		// verify tokenized spam samples
-		assert.Len(t, d.tokenizedSpam, 2)
-		assert.Contains(t, d.tokenizedSpam[0], "win")
-		assert.Contains(t, d.tokenizedSpam[1], "lottery")
+		assert.Len(t, d.model.tokSpam, 2)
+		assert.Contains(t, d.model.tokSpam[0], "win")
+		assert.Contains(t, d.model.tokSpam[1], "lottery")
 
 		// verify classifier learning
-		assert.Equal(t, 5, d.classifier.nAllDocument)
-		assert.Contains(t, d.classifier.learningResults, "win")
-		assert.Contains(t, d.classifier.learningResults["win"], spamClass("spam"))
-		assert.Contains(t, d.classifier.learningResults, "world")
-		assert.Contains(t, d.classifier.learningResults["world"], spamClass("ham"))
+		assert.Equal(t, 5, d.model.cls.nAllDocument)
+		assert.Contains(t, d.model.cls.learningResults, "win")
+		assert.Contains(t, d.model.cls.learningResults["win"], spamClass("spam"))
+		assert.Contains(t, d.model.cls.learningResults, "world")
+		assert.Contains(t, d.model.cls.learningResults["world"], spamClass("ham"))
 
 		// verify excluded tokens in learning results
-		assert.NotContains(t, d.classifier.learningResults, "xyz", "excluded token should not be in learning results")
-		assert.NotContains(t, d.classifier.learningResults, "XyZ", "excluded token should not be in learning results")
+		assert.NotContains(t, d.model.cls.learningResults, "xyz", "excluded token should not be in learning results")
+		assert.NotContains(t, d.model.cls.learningResults, "XyZ", "excluded token should not be in learning results")
 	})
 
 	t.Run("empty samples", func(t *testing.T) {
@@ -2560,7 +2560,7 @@ func TestDetector_LoadSamples(t *testing.T) {
 		assert.Equal(t, 0, lr.ExcludedTokens)
 		assert.Equal(t, 0, lr.SpamSamples)
 		assert.Equal(t, 0, lr.HamSamples)
-		assert.Equal(t, 0, d.classifier.nAllDocument)
+		assert.Equal(t, 0, d.model.cls.nAllDocument)
 	})
 
 	t.Run("multiple readers", func(t *testing.T) {
@@ -2580,8 +2580,8 @@ func TestDetector_LoadSamples(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 3, lr.ExcludedTokens)
 
-		exTkns := make([]string, 0, len(d.excludedTokens))
-		for k := range d.excludedTokens {
+		exTkns := make([]string, 0, len(d.model.excluded))
+		for k := range d.model.excluded {
 			exTkns = append(exTkns, k)
 		}
 		sort.Strings(exTkns)
@@ -2589,12 +2589,12 @@ func TestDetector_LoadSamples(t *testing.T) {
 		assert.Equal(t, []string{"the", "xy", "z"}, exTkns)
 		assert.Equal(t, 2, lr.SpamSamples)
 		assert.Equal(t, 5, lr.HamSamples)
-		t.Logf("Learning results: %+v", d.classifier.learningResults)
-		assert.Equal(t, 7, d.classifier.nAllDocument)
-		assert.Contains(t, d.classifier.learningResults["win"], spamClass("spam"))
-		assert.Contains(t, d.classifier.learningResults["prize"], spamClass("spam"))
-		assert.Contains(t, d.classifier.learningResults["world"], spamClass("ham"))
-		assert.Contains(t, d.classifier.learningResults["some"], spamClass("ham"))
+		t.Logf("Learning results: %+v", d.model.cls.learningResults)
+		assert.Equal(t, 7, d.model.cls.nAllDocument)
+		assert.Contains(t, d.model.cls.learningResults["win"], spamClass("spam"))
+		assert.Contains(t, d.model.cls.learningResults["prize"], spamClass("spam"))
+		assert.Contains(t, d.model.cls.learningResults["world"], spamClass("ham"))
+		assert.Contains(t, d.model.cls.learningResults["some"], spamClass("ham"))
 	})
 }
 
@@ -2613,7 +2613,11 @@ func TestDetector_tokenize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := Detector{excludedTokens: map[string]struct{}{"the": {}, "she": {}}}
+			m := NewSamplesModel()
+			m.lock.Lock()
+			m.excluded = map[string]struct{}{"the": {}, "she": {}}
+			m.lock.Unlock()
+			d := NewDetectorWithModel(Config{}, m)
 			assert.Equal(t, tt.expected, d.tokenize(tt.input))
 		})
 	}
@@ -2874,8 +2878,15 @@ func TestDetector_RemoveSpamHam(t *testing.T) {
 }
 
 func TestDetector_buildDocs(t *testing.T) {
-	d := &Detector{excludedTokens: map[string]struct{}{"the": {}, "and": {}}}
+	m := NewSamplesModel()
+	m.lock.Lock()
+	m.excluded = map[string]struct{}{"the": {}, "and": {}}
+	m.lock.Unlock()
+	d := NewDetectorWithModel(Config{}, m)
 
+	// buildDocs requires the caller to hold the model lock (see detector.go contract).
+	m.lock.RLock()
+	defer m.lock.RUnlock()
 	docs := d.buildDocs("buy crypto coins now", "spam")
 	assert.Len(t, docs, 1, "should create single document")
 	assert.Equal(t, spamClass("spam"), docs[0].spamClass)
@@ -3119,9 +3130,11 @@ func TestDetector_CheckWithShortMessageRunsOnlyEligibleLLMs(t *testing.T) {
 }
 
 func BenchmarkTokenize(b *testing.B) {
-	d := &Detector{
-		excludedTokens: map[string]struct{}{"the": {}, "and": {}, "or": {}, "but": {}, "in": {}, "on": {}, "at": {}, "to": {}},
-	}
+	m := NewSamplesModel()
+	m.lock.Lock()
+	m.excluded = map[string]struct{}{"the": {}, "and": {}, "or": {}, "but": {}, "in": {}, "on": {}, "at": {}, "to": {}}
+	m.lock.Unlock()
+	d := NewDetectorWithModel(Config{}, m)
 
 	tests := []struct {
 		name string

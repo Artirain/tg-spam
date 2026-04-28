@@ -36,17 +36,14 @@ import (
 // It uses a set of checks to determine if a message is spam, and also keeps a list of approved users.
 type Detector struct {
 	Config
-	classifier        classifier
+	model             *SamplesModel
 	openaiChecker     *openAIChecker
 	geminiChecker     *geminiChecker
 	duplicateDetector *duplicateDetector
 	reactionDetector  *reactionDetector
 	metaChecks        []MetaCheck
 	luaChecks         []plugin.Check // separate field for Lua plugin checks
-	tokenizedSpam     []map[string]int
 	approvedUsers     map[string]approved.UserInfo
-	stopWords         []string
-	excludedTokens    map[string]struct{}
 	luaEngine         LuaPluginEngine
 
 	spamSamplesUpd SampleUpdater
@@ -183,30 +180,42 @@ type LoadResult struct {
 	StopWords      int // number of stop words (phrases)
 }
 
-// NewDetector makes a new Detector with the given config.
+// NewDetector makes a new Detector with the given config and a fresh private SamplesModel.
+// To share a SamplesModel across detectors (e.g. multi-chat support), use NewDetectorWithModel.
 func NewDetector(p Config) *Detector {
+	return NewDetectorWithModel(p, NewSamplesModel())
+}
+
+// NewDetectorWithModel makes a new Detector that uses the provided SamplesModel.
+// All sample-related operations (LoadSamples, UpdateSpam, UpdateHam, RemoveSpam,
+// RemoveHam, Reset, classification, similarity, stop-word check) operate on the
+// shared model. Per-Detector state (approved users, duplicate detection, reaction
+// detection, history queues, LLM clients) remains private to this Detector.
+//
+// Calling Detector.Reset() on a Detector built with a shared model wipes the shared
+// state for ALL detectors holding that model. Coordinate at the caller layer.
+func NewDetectorWithModel(p Config, model *SamplesModel) *Detector {
+	if model == nil {
+		model = NewSamplesModel()
+	}
 	res := &Detector{
 		Config:            p,
-		classifier:        newClassifier(),
+		model:             model,
 		approvedUsers:     make(map[string]approved.UserInfo),
-		tokenizedSpam:     []map[string]int{},
 		metaChecks:        []MetaCheck{},
 		luaChecks:         []plugin.Check{},
 		hamHistory:        spamcheck.NewLastRequests(p.HistorySize),
 		spamHistory:       spamcheck.NewLastRequests(p.HistorySize),
 		duplicateDetector: newDuplicateDetector(p.DuplicateDetection.Threshold, p.DuplicateDetection.Window),
 		reactionDetector:  newReactionDetector(p.ReactionSpam.MaxReactions, p.ReactionSpam.Window),
-		luaEngine:         nil, // will be set with WithLuaEngine if needed
+		luaEngine:         nil,
 	}
 	res.LLMConsensus = res.normalizeLLMConsensusMode(p.LLMConsensus)
-	// if FirstMessagesCount is set, FirstMessageOnly enforced to true.
-	// this is to avoid confusion when FirstMessagesCount is set but FirstMessageOnly is false.
-	// the reason for the redundant FirstMessageOnly flag is to avoid breaking api compatibility.
 	if p.FirstMessagesCount > 0 {
 		res.FirstMessageOnly = true
 	}
 	if p.FirstMessageOnly && p.FirstMessagesCount == 0 {
-		res.FirstMessagesCount = 1 // default value for FirstMessagesCount if FirstMessageOnly is set
+		res.FirstMessagesCount = 1
 	}
 	return res
 }
@@ -241,7 +250,7 @@ func (d *Detector) Check(req spamcheck.Request) (spam bool, cr []spamcheck.Respo
 	// all the remaining checks are performed sequentially, so we can collect all the results
 
 	// check for stop words if any stop words are loaded
-	if len(d.stopWords) > 0 {
+	if d.model.stopWordsLen() > 0 {
 		cr = append(cr, d.isStopWord(cleanMsg, req))
 	}
 
@@ -299,14 +308,13 @@ func (d *Detector) Check(req spamcheck.Request) (spam bool, cr []spamcheck.Respo
 
 	// check for spam similarity if a similarity threshold is set and spam samples are loaded
 	// skip for short messages as similarity doesn't work well on short text
-	if !isShortMessage && d.SimilarityThreshold > 0 && len(d.tokenizedSpam) > 0 {
+	if !isShortMessage && d.SimilarityThreshold > 0 && d.model.tokenizedSpamLen() > 0 {
 		cr = append(cr, d.isSpamSimilarityHigh(cleanMsg))
 	}
 
 	// check for spam with classifier if classifier is loaded
 	// skip for short messages as classifier doesn't work well on short text
-	classifierReady := d.classifier.nAllDocument > 0 &&
-		d.classifier.nDocumentByClass["ham"] > 0 && d.classifier.nDocumentByClass["spam"] > 0
+	classifierReady := d.model.classifierReady()
 	if !isShortMessage && classifierReady {
 		cr = append(cr, d.isSpamClassified(cleanMsg))
 	}
@@ -475,11 +483,8 @@ func (d *Detector) Reset() {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 
-	d.tokenizedSpam = []map[string]int{}
-	d.excludedTokens = map[string]struct{}{}
-	d.classifier.reset()
+	d.model.Reset()
 	d.approvedUsers = make(map[string]approved.UserInfo)
-	d.stopWords = []string{}
 
 	// close the Lua engine and reset Lua checks if it exists
 	if d.luaEngine != nil {
@@ -682,24 +687,24 @@ func (d *Detector) GetLuaPluginNames() []string {
 // LoadSamples loads spam samples from a reader and updates the classifier.
 // Reset spam, ham samples/classifier, and excluded tokens.
 func (d *Detector) LoadSamples(exclReader io.Reader, spamReaders, hamReaders []io.Reader) (LoadResult, error) {
-	d.lock.Lock()
-	defer d.lock.Unlock()
+	d.model.lock.Lock()
+	defer d.model.lock.Unlock()
 
-	d.tokenizedSpam = []map[string]int{}
-	d.excludedTokens = map[string]struct{}{}
-	d.classifier.reset()
+	d.model.tokSpam = []map[string]int{}
+	d.model.excluded = map[string]struct{}{}
+	d.model.cls.reset()
 
 	// excluded tokens should be loaded before spam samples to exclude them from spam tokenization
 	for t := range d.readerIterator(exclReader) {
-		d.excludedTokens[strings.ToLower(t)] = struct{}{}
+		d.model.excluded[strings.ToLower(t)] = struct{}{}
 	}
-	lr := LoadResult{ExcludedTokens: len(d.excludedTokens)}
+	lr := LoadResult{ExcludedTokens: len(d.model.excluded)}
 
 	// load spam samples and update the classifier with them
 	docs := make([]document, 0) //nolint:prealloc // iterator size unknown
 	for token := range d.readerIterator(spamReaders...) {
-		tokenizedSpam := d.tokenize(token)
-		d.tokenizedSpam = append(d.tokenizedSpam, tokenizedSpam) // add to list of samples
+		tokenizedSpam := d.model.tokenizeUnlocked(token)
+		d.model.tokSpam = append(d.model.tokSpam, tokenizedSpam) // add to list of samples
 		tokens := make([]string, 0, len(tokenizedSpam))
 		for token := range tokenizedSpam {
 			tokens = append(tokens, token)
@@ -710,7 +715,7 @@ func (d *Detector) LoadSamples(exclReader io.Reader, spamReaders, hamReaders []i
 
 	// load ham samples and update the classifier with them
 	for token := range d.readerIterator(hamReaders...) {
-		tokenizedSpam := d.tokenize(token)
+		tokenizedSpam := d.model.tokenizeUnlocked(token)
 		tokens := make([]string, 0, len(tokenizedSpam))
 		for token := range tokenizedSpam {
 			tokens = append(tokens, token)
@@ -719,20 +724,20 @@ func (d *Detector) LoadSamples(exclReader io.Reader, spamReaders, hamReaders []i
 		lr.HamSamples++
 	}
 
-	d.classifier.learn(docs...)
+	d.model.cls.learn(docs...)
 	return lr, nil
 }
 
 // LoadStopWords loads stop words from a reader. Reset stop words list before loading.
 func (d *Detector) LoadStopWords(readers ...io.Reader) (LoadResult, error) {
-	d.lock.Lock()
-	defer d.lock.Unlock()
+	d.model.lock.Lock()
+	defer d.model.lock.Unlock()
 
-	d.stopWords = []string{}
+	d.model.stops = []string{}
 	for t := range d.readerIterator(readers...) {
-		d.stopWords = append(d.stopWords, strings.ToLower(t))
+		d.model.stops = append(d.model.stops, strings.ToLower(t))
 	}
-	return LoadResult{StopWords: len(d.stopWords)}, nil
+	return LoadResult{StopWords: len(d.model.stops)}, nil
 }
 
 // UpdateSpam appends a message to the spam samples file and updates the classifier
@@ -758,9 +763,6 @@ func (d *Detector) RemoveHam(msg string) error {
 // updateSample appends a message to the samples store and updates the classifier
 // doesn't reset state, update append samples
 func (d *Detector) updateSample(msg string, upd SampleUpdater, sc spamClass) error {
-	d.lock.Lock()
-	defer d.lock.Unlock()
-
 	if upd == nil {
 		return nil
 	}
@@ -770,14 +772,17 @@ func (d *Detector) updateSample(msg string, upd SampleUpdater, sc spamClass) err
 		return fmt.Errorf("can't update %s samples: %w", sc, err)
 	}
 
+	d.model.lock.Lock()
+	defer d.model.lock.Unlock()
+
 	// load samples and update the classifier with them
 	docs := d.buildDocs(msg, sc)
-	d.classifier.learn(docs...)
+	d.model.cls.learn(docs...)
 
 	// update tokenized spam samples for similarity check
 	if sc == ClassSpam {
-		tokenizedSpam := d.tokenize(msg)
-		d.tokenizedSpam = append(d.tokenizedSpam, tokenizedSpam)
+		tokenizedSpam := d.model.tokenizeUnlocked(msg)
+		d.model.tokSpam = append(d.model.tokSpam, tokenizedSpam)
 	}
 
 	return nil
@@ -785,33 +790,35 @@ func (d *Detector) updateSample(msg string, upd SampleUpdater, sc spamClass) err
 
 // removeSample removes a message from the spam samples file and updates the classifier by unlearning
 func (d *Detector) removeSample(msg string, upd SampleUpdater, sc spamClass) error {
-	d.lock.Lock()
-	defer d.lock.Unlock()
-
 	if upd == nil {
 		return nil
 	}
 
+	d.model.lock.Lock()
+	defer d.model.lock.Unlock()
+
 	// first validate that we can unlearn this sample
 	docs := d.buildDocs(msg, sc)
-	if err := d.classifier.unlearn(docs...); err != nil {
+	if err := d.model.cls.unlearn(docs...); err != nil {
 		return fmt.Errorf("can't unlearn %s samples: %w", sc, err)
 	}
 
 	// if unlearn succeeded, remove from storage
 	if err := upd.Remove(msg); err != nil {
 		// try to relearn since storage update failed
-		d.classifier.learn(docs...)
+		d.model.cls.learn(docs...)
 		return fmt.Errorf("can't remove %s samples: %w", sc, err)
 	}
 	return nil
 }
 
-// buildDocs builds a list of classifier documents from a message
+// buildDocs builds a list of classifier documents from a message.
+// Caller MUST already hold d.model.lock (write or read) — this helper uses
+// tokenizeUnlocked to avoid deadlock with the lock-acquiring d.tokenize wrapper.
 func (d *Detector) buildDocs(msg string, sc spamClass) []document {
 	docs := make([]document, 0) //nolint:prealloc // iterator size unknown
 	for token := range d.readerIterator(bytes.NewBufferString(msg)) {
-		tokenizedSample := d.tokenize(token)
+		tokenizedSample := d.model.tokenizeUnlocked(token)
 		tokens := make([]string, 0, len(tokenizedSample))
 		for token := range tokenizedSample {
 			tokens = append(tokens, token)
@@ -844,39 +851,20 @@ func (d *Detector) readerIterator(readers ...io.Reader) iter.Seq[string] {
 	}
 }
 
-// tokenize takes a string and returns a map where the keys are unique words (tokens)
-// and the values are the frequencies of those words in the string.
-// exclude tokens representing common words.
+// tokenize delegates tokenization to the shared SamplesModel using its own RLock.
+// Callers that already hold d.model.lock (write or read) MUST instead call
+// d.model.tokenizeUnlocked directly to avoid deadlock.
 func (d *Detector) tokenize(inp string) map[string]int {
-	isExcludedToken := func(token string) bool {
-		if _, ok := d.excludedTokens[strings.ToLower(token)]; ok {
-			return true
-		}
-		return false
-	}
-
-	tokenFrequency := make(map[string]int)
-	for token := range strings.FieldsSeq(inp) {
-		if isExcludedToken(token) {
-			continue
-		}
-		token = cleanEmoji(token)
-		token = strings.Trim(token, ".,!?-:;()#")
-		token = strings.ToLower(token)
-		if len([]rune(token)) < 3 {
-			continue
-		}
-		tokenFrequency[strings.ToLower(token)]++
-	}
-	return tokenFrequency
+	return d.model.tokenize(inp)
 }
 
 // isSpam checks if a given message is similar to any of the known bad messages
 func (d *Detector) isSpamSimilarityHigh(msg string) spamcheck.Response {
-	// check for spam similarity
-	tokenizedMessage := d.tokenize(msg)
+	d.model.lock.RLock()
+	defer d.model.lock.RUnlock()
+	tokenizedMessage := d.model.tokenizeUnlocked(msg)
 	maxSimilarity := 0.0
-	for _, spam := range d.tokenizedSpam {
+	for _, spam := range d.model.tokSpam {
 		similarity := d.cosineSimilarity(tokenizedMessage, spam)
 		if similarity > maxSimilarity {
 			maxSimilarity = similarity
@@ -1005,12 +993,14 @@ func (d *Detector) isCasSpam(msgID string) spamcheck.Response {
 
 // isSpamClassified classify tokens from a document
 func (d *Detector) isSpamClassified(msg string) spamcheck.Response {
-	tm := d.tokenize(msg)
+	d.model.lock.RLock()
+	defer d.model.lock.RUnlock()
+	tm := d.model.tokenizeUnlocked(msg)
 	tokens := make([]string, 0, len(tm))
 	for token := range tm {
 		tokens = append(tokens, token)
 	}
-	class, prob, certain := d.classifier.classify(tokens...)
+	class, prob, certain := d.model.cls.classify(tokens...)
 	isSpam := class == ClassSpam && certain && (d.MinSpamProbability == 0 || prob >= d.MinSpamProbability)
 
 	// handle NaN or infinite probability values
@@ -1027,9 +1017,11 @@ func (d *Detector) isSpamClassified(msg string) spamcheck.Response {
 // stop words prefixed with "=" require exact match (whole text equals the word),
 // otherwise substring match is used.
 func (d *Detector) isStopWord(msg string, req spamcheck.Request) spamcheck.Response {
+	d.model.lock.RLock()
+	defer d.model.lock.RUnlock()
 	// check message text
 	cleanMsg := normalizeSpaces(cleanEmoji(strings.ToLower(msg)))
-	for _, word := range d.stopWords { // stop words are already lowercased
+	for _, word := range d.model.stops { // stop words are already lowercased
 		if matchStopWord(cleanMsg, word) {
 			return spamcheck.Response{Name: "stopword", Spam: true, Details: strings.TrimPrefix(word, "=")}
 		}
@@ -1045,7 +1037,7 @@ func (d *Detector) isStopWord(msg string, req spamcheck.Request) spamcheck.Respo
 	}
 	for _, name := range names {
 		normalizedName := normalizeSpaces(strings.ToLower(name))
-		for _, word := range d.stopWords {
+		for _, word := range d.model.stops {
 			if matchStopWord(normalizedName, word) {
 				return spamcheck.Response{Name: "stopword", Spam: true, Details: strings.TrimPrefix(word, "=")}
 			}
