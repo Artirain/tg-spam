@@ -1,7 +1,6 @@
 package tgspam
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,5 +15,3 @@ func TestNewSamplesModel(t *testing.T) {
 	assert.Equal(t, 0, m.stopWordsLen())
 	assert.Equal(t, 0, m.excludedTokensLen())
 }
-
-var _ = sync.RWMutex{} // imports stay used after later tasks add concurrency tests

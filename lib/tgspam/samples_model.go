@@ -40,7 +40,7 @@ func (m *SamplesModel) classifierAllDocs() int {
 func (m *SamplesModel) classifierReady() bool {
 	m.lock.RLock()
 	defer m.lock.RUnlock()
-	return m.cls.nAllDocument > 0 && m.cls.nDocumentByClass["ham"] > 0 && m.cls.nDocumentByClass["spam"] > 0
+	return m.cls.nAllDocument > 0 && m.cls.nDocumentByClass[ClassHam] > 0 && m.cls.nDocumentByClass[ClassSpam] > 0
 }
 
 // tokenizedSpamLen returns the number of tokenized spam samples.
