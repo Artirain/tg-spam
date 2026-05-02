@@ -506,10 +506,11 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 	defer loggerWr.Close()
 
 	// make spam logger
-	spamLogger, err := makeSpamLogger(ctx, settings.InstanceID, loggerWr, dataDB)
+	spamLogger, detectedSpamStore, err := makeSpamLogger(ctx, settings.InstanceID, loggerWr, dataDB)
 	if err != nil {
 		return fmt.Errorf("can't make spam logger, %w", err)
 	}
+	_ = detectedSpamStore // wired into runtimeChatContext slice in Task 7
 
 	// make telegram listener
 	tgListener := events.TelegramListener{
@@ -1021,12 +1022,13 @@ type nopWriteCloser struct{ io.Writer }
 func (n nopWriteCloser) Close() error { return nil }
 
 // makeSpamLogger creates spam logger to keep reports about spam messages
-// it writes json lines to the provided writer
-func makeSpamLogger(ctx context.Context, gid string, wr io.Writer, dataDB *engine.SQL) (events.SpamLogger, error) {
+// it writes json lines to the provided writer and returns the underlying
+// detected-spam store so callers can wire it into per-chat runtime context
+func makeSpamLogger(ctx context.Context, gid string, wr io.Writer, dataDB *engine.SQL) (events.SpamLogger, *storage.DetectedSpam, error) {
 	// make store and load approved users
 	detectedSpamStore, auErr := storage.NewDetectedSpam(ctx, dataDB)
 	if auErr != nil {
-		return nil, fmt.Errorf("can't make approved users store, %w", auErr)
+		return nil, nil, fmt.Errorf("can't make approved users store, %w", auErr)
 	}
 
 	logWr := events.SpamLoggerFunc(func(msg *bot.Message, response *bot.Response) {
@@ -1073,7 +1075,7 @@ func makeSpamLogger(ctx context.Context, gid string, wr io.Writer, dataDB *engin
 		}
 	})
 
-	return logWr, nil
+	return logWr, detectedSpamStore, nil
 }
 
 // makeSpamLogWriter creates spam log writer to keep reports about spam messages

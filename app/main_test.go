@@ -37,8 +37,9 @@ func TestMakeSpamLogger(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	logger, err := makeSpamLogger(context.Background(), "gr1", file, db)
+	logger, detectedSpamStore, err := makeSpamLogger(context.Background(), "gr1", file, db)
 	require.NoError(t, err)
+	require.NotNil(t, detectedSpamStore)
 
 	msg := &bot.Message{
 		From: bot.User{
