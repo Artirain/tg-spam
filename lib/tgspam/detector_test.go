@@ -3591,3 +3591,35 @@ func TestDetector_LegacyConstructor_PrivateModel(t *testing.T) {
 	assert.NotSame(t, d1.model, d2.model,
 		"NewDetector should allocate a fresh SamplesModel each time, preserving prior single-tenant behavior")
 }
+
+func TestDetector_Reset_PropagatesAcrossSharedDetectors(t *testing.T) {
+	model := NewSamplesModel()
+	cfg := Config{MinMsgLen: 1}
+	d1 := NewDetectorWithModel(cfg, model)
+	d2 := NewDetectorWithModel(cfg, model)
+
+	// seed shared model via d1 (need a SampleUpdater for UpdateSpam to actually write)
+	d1.WithSpamUpdater(&mocks.SampleUpdaterMock{
+		AppendFunc: func(string) error { return nil },
+		RemoveFunc: func(string) error { return nil },
+	})
+	require.NoError(t, d1.UpdateSpam("buy cheap viagra"))
+	require.NoError(t, d1.UpdateSpam("free crypto airdrop"))
+	require.Positive(t, d2.model.tokenizedSpamLen(),
+		"d2 must observe d1's spam additions via shared model")
+
+	// per-detector approved-users on d2 — Reset on d1 must NOT touch d2's
+	require.NoError(t, d2.AddApprovedUser(approved.UserInfo{UserID: "777", UserName: "carol"}))
+	require.True(t, d2.IsApprovedUser("777"))
+
+	// d1.Reset wipes shared model — d2 sees the wipe
+	d1.Reset()
+	assert.Equal(t, 0, d2.model.tokenizedSpamLen(),
+		"d1.Reset must wipe shared SamplesModel that d2 holds")
+	assert.Equal(t, 0, d2.model.classifierAllDocs(),
+		"d1.Reset must reset shared classifier visible to d2")
+
+	// per-detector state on d2 survives d1.Reset
+	assert.True(t, d2.IsApprovedUser("777"),
+		"d1.Reset must NOT touch d2's per-detector approved users")
+}
