@@ -524,3 +524,34 @@ func TestNewPostgres(t *testing.T) {
 		})
 	}
 }
+
+func TestSQL_WithGID(t *testing.T) {
+	ctx := context.Background()
+	root, err := New(ctx, ":memory:", "instance-x")
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	scoped := root.WithGID("chat_42")
+
+	t.Run("scoped has new gid", func(t *testing.T) {
+		assert.Equal(t, "chat_42", scoped.GID())
+	})
+	t.Run("root gid unchanged", func(t *testing.T) {
+		assert.Equal(t, "instance-x", root.GID())
+	})
+	t.Run("dbType preserved", func(t *testing.T) {
+		assert.Equal(t, root.Type(), scoped.Type())
+	})
+	t.Run("shared connection visible across copies", func(t *testing.T) {
+		_, err := root.ExecContext(ctx, "CREATE TABLE phase2_probe (id INTEGER)")
+		require.NoError(t, err)
+		var n int
+		err = scoped.GetContext(ctx, &n, "SELECT COUNT(*) FROM phase2_probe")
+		require.NoError(t, err)
+		assert.Equal(t, 0, n)
+	})
+	t.Run("empty gid is accepted", func(t *testing.T) {
+		empty := root.WithGID("")
+		assert.Equal(t, "", empty.GID())
+	})
+}

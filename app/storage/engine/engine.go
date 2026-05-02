@@ -127,6 +127,19 @@ func (e *SQL) GID() string {
 	return e.gid
 }
 
+// WithGID returns a shallow copy of *SQL with the gid replaced.
+// The underlying *sqlx.DB and any internal locks are shared — Close must only
+// be called on the root engine, never on a scoped copy.
+//
+// Used by multi-chat callers to scope per-chat stores (Locator, ApprovedUsers,
+// DetectedSpam, Reports, Warnings) to a specific chat's gid while reusing the
+// single connection pool of the root engine.
+func (e *SQL) WithGID(gid string) *SQL {
+	cp := *e
+	cp.gid = gid
+	return &cp
+}
+
 // Type returns the database engine type
 func (e *SQL) Type() Type {
 	return e.dbType
