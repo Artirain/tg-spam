@@ -517,7 +517,25 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 	if err != nil {
 		return fmt.Errorf("can't make spam logger, %w", err)
 	}
-	_ = detectedSpamStore // wired into runtimeChatContext slice in Task 7
+	chatCtxs := make([]*runtimeChatContext, 0, len(settings.Telegram.Groups))
+	for i := range settings.Telegram.Groups {
+		gcfg := settings.Telegram.Groups[i]
+		scopedDB := dataDB.WithGID(gcfg.GID)
+		chatCtxs = append(chatCtxs, &runtimeChatContext{
+			gid:           gcfg.GID,
+			scopedDB:      scopedDB,
+			detector:      detector,           // shared single instance — per-chat split is Phase 4
+			spamFilter:    spamBot,            // shared — per-chat split is Phase 4
+			locator:       locator,            // single — per-chat in Phase 4
+			approvedUsers: approvedUsersStore, // single — per-chat in Phase 4
+			detectedSpam:  detectedSpamStore,
+			reports:       reportsStore,
+			warnings:      warningsStore,
+		})
+	}
+	for _, c := range chatCtxs {
+		log.Printf("[INFO] chat context wired: gid=%s (multi-chat routing pending Phase 4)", c.gid)
+	}
 
 	// make telegram listener
 	tgListener := events.TelegramListener{
