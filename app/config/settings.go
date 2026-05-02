@@ -5,7 +5,10 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
+	"regexp"
 	"time"
 )
 
@@ -65,20 +68,50 @@ type Settings struct {
 	Transient TransientSettings `json:"-" yaml:"-"`
 }
 
+// ConfiguredChat is one Telegram target group entry from Telegram.Groups.
+// Group is the human-readable name or numeric chat ID like -1001234567890.
+// GID is optional in YAML/env; when empty, NormalizeGroups fills it with InstanceID
+// (Phase 2). The future chat_<resolved_chat_id> default for explicit multi-chat
+// lands in Phase 4 alongside chat-id resolution against Telegram.
+type ConfiguredChat struct {
+	Group string `json:"group" yaml:"group"`
+	GID   string `json:"gid"   yaml:"gid"`
+}
+
+// gidPattern is the validation regex for gid values. Capped at 24 characters to
+// keep the inline-button callback payload within Telegram's 64-byte callback_data
+// limit (see design spec §Callback payload format).
+var gidPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,24}$`)
+
+// Validate checks the static shape of a ConfiguredChat.
+// Group must be non-empty. GID, when set, must match gidPattern.
+// Empty GID is allowed and resolved by NormalizeGroups.
+func (c ConfiguredChat) Validate() error {
+	if c.Group == "" {
+		return errors.New("group is required")
+	}
+	if c.GID != "" && !gidPattern.MatchString(c.GID) {
+		return fmt.Errorf("gid %q invalid: must match %s", c.GID, gidPattern.String())
+	}
+	return nil
+}
+
 // TelegramSettings contains Telegram-specific settings
 type TelegramSettings struct {
-	Group        string        `json:"group" yaml:"group" db:"telegram_group"`
-	IdleDuration time.Duration `json:"idle_duration" yaml:"idle_duration" db:"telegram_idle_duration"`
-	Timeout      time.Duration `json:"timeout" yaml:"timeout" db:"telegram_timeout"`
-	Token        string        `json:"token" yaml:"token" db:"telegram_token"`
+	Group        string           `json:"group"         yaml:"group"         db:"telegram_group"`
+	Groups       []ConfiguredChat `json:"-"             yaml:"groups"        db:"-"`
+	IdleDuration time.Duration    `json:"idle_duration" yaml:"idle_duration" db:"telegram_idle_duration"`
+	Timeout      time.Duration    `json:"timeout"       yaml:"timeout"       db:"telegram_timeout"`
+	Token        string           `json:"token"         yaml:"token"         db:"telegram_token"`
 }
 
 // AdminSettings contains admin-related settings
 type AdminSettings struct {
-	AdminGroup              string   `json:"admin_group" yaml:"admin_group" db:"admin_group"`
+	AdminGroup              string   `json:"admin_group"                yaml:"admin_group"                db:"admin_group"`
 	DisableAdminSpamForward bool     `json:"disable_admin_spam_forward" yaml:"disable_admin_spam_forward" db:"disable_admin_spam_forward"`
-	TestingIDs              []int64  `json:"testing_ids" yaml:"testing_ids" db:"testing_ids"`
-	SuperUsers              []string `json:"super_users" yaml:"super_users" db:"super_users"`
+	TestingIDs              []int64  `json:"testing_ids"                yaml:"testing_ids"                db:"testing_ids"`
+	SuperUsers              []string `json:"super_users"                yaml:"super_users"                db:"super_users"`
+	SuperUsersCrossChat     bool     `json:"-"                          yaml:"superusers_cross_chat"      db:"-"`
 }
 
 // HistorySettings contains history-related settings

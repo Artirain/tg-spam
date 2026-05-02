@@ -594,3 +594,30 @@ func TestSettings_IsStartupMessageEnabled(t *testing.T) {
 		})
 	}
 }
+
+func TestConfiguredChat_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		chat    ConfiguredChat
+		wantErr string
+	}{
+		{name: "valid with explicit gid", chat: ConfiguredChat{Group: "MyGroup", GID: "main"}},
+		{name: "valid with empty gid (runtime fills)", chat: ConfiguredChat{Group: "MyGroup"}},
+		{name: "valid numeric chat id", chat: ConfiguredChat{Group: "-1001234567890", GID: "secondary"}},
+		{name: "empty group rejected", chat: ConfiguredChat{Group: "", GID: "x"}, wantErr: "group is required"},
+		{name: "gid with colon rejected", chat: ConfiguredChat{Group: "g", GID: "bad:gid"}, wantErr: "gid"},
+		{name: "gid 25 chars rejected", chat: ConfiguredChat{Group: "g", GID: "abcdefghijklmnopqrstuvwxy"}, wantErr: "gid"},
+		{name: "gid with spaces rejected", chat: ConfiguredChat{Group: "g", GID: "with space"}, wantErr: "gid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.chat.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
