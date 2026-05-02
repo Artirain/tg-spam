@@ -307,6 +307,9 @@ func main() {
 			s.ApplyDefaults(defaults)
 			applyOperationalCLIOverrides(s, opts, defaults)
 			normalizeFilePaths(s)
+			if err := s.NormalizeGroups(); err != nil {
+				log.Printf("[WARN] reload: invalid chat configuration: %v", err)
+			}
 		}
 	} else {
 		// traditional mode - CLI is source of truth
@@ -410,12 +413,16 @@ func validateSettings(s *config.Settings) error {
 // non-nil, is forwarded to webapi so POST /config/reload can reapply startup-
 // equivalent defaults-fill and operational CLI overrides on top of the DB blob.
 func execute(ctx context.Context, settings *config.Settings, reloadNormalize func(*config.Settings)) error {
+	if err := settings.NormalizeGroups(); err != nil {
+		return fmt.Errorf("invalid chat configuration: %w", err)
+	}
+
 	if settings.Dry {
 		log.Print("[WARN] dry mode, no actual bans")
 	}
 
 	convertOnly := settings.Convert == "only"
-	if !settings.Server.Enabled && !convertOnly && (settings.Telegram.Token == "" || settings.Telegram.Group == "") {
+	if !settings.Server.Enabled && !convertOnly && (settings.Telegram.Token == "" || len(settings.Telegram.Groups) == 0) {
 		return errors.New("telegram token and group are required")
 	}
 
@@ -481,7 +488,7 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 	}
 
 	// activate web server if enabled, server-only mode (no telegram token)
-	if settings.Server.Enabled && (settings.Telegram.Token == "" || settings.Telegram.Group == "") {
+	if settings.Server.Enabled && (settings.Telegram.Token == "" || len(settings.Telegram.Groups) == 0) {
 		// server starts in background goroutine without DM users provider
 		if srvErr := activateServer(ctx, settings, spamBot, locator, dataDB, nil, "", reloadNormalize); srvErr != nil {
 			return fmt.Errorf("can't activate web server, %w", srvErr)
@@ -575,6 +582,23 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 		return fmt.Errorf("telegram listener failed, %w", err)
 	}
 	return nil
+}
+
+// runtimeChatContext is the per-chat runtime bundle resolved at startup.
+// One instance per ConfiguredChat in Settings.Telegram.Groups. Phase 2 only
+// populates this for the single configured chat (cap = 1 in NormalizeGroups);
+// Phase 4 will move this type to app/events with listener-friendly interfaces
+// and route updates per chat-id.
+type runtimeChatContext struct {
+	gid           string
+	scopedDB      *engine.SQL
+	detector      *tgspam.Detector
+	spamFilter    *bot.SpamFilter
+	locator       *storage.Locator
+	approvedUsers *storage.ApprovedUsers
+	detectedSpam  *storage.DetectedSpam
+	reports       *storage.Reports
+	warnings      *storage.Warnings
 }
 
 // makeDB creates database connection based on the settings model
