@@ -96,6 +96,47 @@ func (c ConfiguredChat) Validate() error {
 	return nil
 }
 
+// NormalizeGroups reconciles legacy Telegram.Group with the new Telegram.Groups
+// list. Lenient: no error when no chat is configured (server-only / convert-only
+// modes legitimately have no telegram chat). Caller decides what "no chat" means
+// in their context.
+//
+// Rules:
+//   - Both empty -> no-op, returns nil. Caller must check len(Groups) before
+//     proceeding into Telegram-using flows.
+//   - Only Telegram.Group set -> populate Groups[0] = {Group, GID: InstanceID}.
+//   - Only Telegram.Groups set -> fill empty GID with InstanceID; canonicalise
+//     Telegram.Group to Groups[0].Group so legacy reads stay consistent.
+//   - Both set -> Groups wins (canonical); Telegram.Group overwritten to match
+//     Groups[0].Group. No error even when they differed at input.
+//   - len(Groups) > 1 -> ERROR (Phase 2 cap; lifted in Phase 4 with listener routing).
+//   - Any ConfiguredChat with invalid gid (including one inherited from
+//     InstanceID) -> ERROR. Validation runs after fill so an InstanceID that
+//     fails gidPattern is rejected too.
+//
+// Idempotent: a second call on already-normalised settings is a no-op.
+func (s *Settings) NormalizeGroups() error {
+	if len(s.Telegram.Groups) == 0 && s.Telegram.Group == "" {
+		return nil
+	}
+	if len(s.Telegram.Groups) == 0 {
+		s.Telegram.Groups = []ConfiguredChat{{Group: s.Telegram.Group, GID: s.InstanceID}}
+	}
+	if len(s.Telegram.Groups) > 1 {
+		return errors.New("multi-chat routing is not yet supported in this build; configure a single group")
+	}
+	for i := range s.Telegram.Groups {
+		if s.Telegram.Groups[i].GID == "" {
+			s.Telegram.Groups[i].GID = s.InstanceID
+		}
+		if err := s.Telegram.Groups[i].Validate(); err != nil {
+			return fmt.Errorf("telegram.groups[%d]: %w", i, err)
+		}
+	}
+	s.Telegram.Group = s.Telegram.Groups[0].Group
+	return nil
+}
+
 // TelegramSettings contains Telegram-specific settings
 type TelegramSettings struct {
 	Group        string           `json:"group"         yaml:"group"         db:"telegram_group"`

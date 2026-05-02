@@ -621,3 +621,85 @@ func TestConfiguredChat_Validate(t *testing.T) {
 		})
 	}
 }
+
+func TestSettings_NormalizeGroups(t *testing.T) {
+	t.Run("legacy Group fills Groups[0] with InstanceID gid", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Group = "MyGroup"
+		require.NoError(t, s.NormalizeGroups())
+		require.Len(t, s.Telegram.Groups, 1)
+		assert.Equal(t, "MyGroup", s.Telegram.Groups[0].Group)
+		assert.Equal(t, "instX", s.Telegram.Groups[0].GID)
+		assert.Equal(t, "MyGroup", s.Telegram.Group)
+	})
+
+	t.Run("explicit Groups wins; legacy Group canonicalised to match", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Group = "stale"
+		s.Telegram.Groups = []ConfiguredChat{{Group: "Real", GID: "main"}}
+		require.NoError(t, s.NormalizeGroups())
+		require.Len(t, s.Telegram.Groups, 1)
+		assert.Equal(t, "Real", s.Telegram.Groups[0].Group)
+		assert.Equal(t, "main", s.Telegram.Groups[0].GID)
+		assert.Equal(t, "Real", s.Telegram.Group, "legacy Group must be canonicalised to Groups[0].Group")
+	})
+
+	t.Run("both empty returns nil (caller decides)", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		require.NoError(t, s.NormalizeGroups())
+		assert.Empty(t, s.Telegram.Groups)
+		assert.Empty(t, s.Telegram.Group)
+	})
+
+	t.Run("Phase 2 caps at one chat", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Groups = []ConfiguredChat{
+			{Group: "g1", GID: "a"},
+			{Group: "g2", GID: "b"},
+		}
+		err := s.NormalizeGroups()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "single group")
+	})
+
+	t.Run("explicit Groups with empty gid gets InstanceID", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Groups = []ConfiguredChat{{Group: "MyGroup"}}
+		require.NoError(t, s.NormalizeGroups())
+		assert.Equal(t, "instX", s.Telegram.Groups[0].GID,
+			"empty GID must be filled with InstanceID in Phase 2")
+	})
+
+	t.Run("invalid gid rejected", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Groups = []ConfiguredChat{{Group: "g", GID: "bad:gid"}}
+		err := s.NormalizeGroups()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "gid")
+	})
+
+	t.Run("legacy fallback rejects invalid InstanceID-derived gid", func(t *testing.T) {
+		s := &Settings{InstanceID: "bad:gid"}
+		s.Telegram.Group = "MyGroup"
+		err := s.NormalizeGroups()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "gid")
+	})
+
+	t.Run("explicit Groups empty-gid rejects invalid InstanceID-derived gid", func(t *testing.T) {
+		s := &Settings{InstanceID: "bad:gid"}
+		s.Telegram.Groups = []ConfiguredChat{{Group: "MyGroup"}}
+		err := s.NormalizeGroups()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "gid")
+	})
+
+	t.Run("idempotent: second call is no-op", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Group = "MyGroup"
+		require.NoError(t, s.NormalizeGroups())
+		groups1 := append([]ConfiguredChat(nil), s.Telegram.Groups...)
+		require.NoError(t, s.NormalizeGroups())
+		assert.Equal(t, groups1, s.Telegram.Groups)
+	})
+}
