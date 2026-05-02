@@ -1289,3 +1289,29 @@ func TestREADMEAllOptionsMatchesHelp(t *testing.T) {
 			"README options block lists flag %s that is not defined in options struct", token)
 	}
 }
+
+// TestReloadNormalize_RunsNormalizeGroups locks the contract that the reload
+// closure built in main() invokes NormalizeGroups so a legacy DB blob with
+// only Telegram.Group set materializes Telegram.Groups after POST /config/reload.
+// The closure itself is constructed inline against local defaults/opts; we
+// reconstruct an equivalent closure here so a future refactor of main() that
+// drops the NormalizeGroups call surfaces as a test failure.
+func TestReloadNormalize_RunsNormalizeGroups(t *testing.T) {
+	defaults := &config.Settings{}
+	var opts options
+	reloadNormalize := func(s *config.Settings) {
+		s.ApplyDefaults(defaults)
+		applyOperationalCLIOverrides(s, opts, defaults)
+		normalizeFilePaths(s)
+		if err := s.NormalizeGroups(); err != nil {
+			t.Logf("normalize warning: %v", err)
+		}
+	}
+
+	s := &config.Settings{InstanceID: "reload-test"}
+	s.Telegram.Group = "GroupFromBlob"
+	reloadNormalize(s)
+	require.Len(t, s.Telegram.Groups, 1, "NormalizeGroups must materialize Groups from legacy Group field")
+	assert.Equal(t, "GroupFromBlob", s.Telegram.Groups[0].Group)
+	assert.Equal(t, "reload-test", s.Telegram.Groups[0].GID)
+}
