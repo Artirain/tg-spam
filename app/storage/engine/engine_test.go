@@ -552,6 +552,6 @@ func TestSQL_WithGID(t *testing.T) {
 	})
 	t.Run("empty gid is accepted", func(t *testing.T) {
 		empty := root.WithGID("")
-		assert.Equal(t, "", empty.GID())
+		assert.Empty(t, empty.GID())
 	})
 }

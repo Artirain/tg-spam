@@ -1066,7 +1066,9 @@ func (n nopWriteCloser) Close() error { return nil }
 // makeSpamLogger creates spam logger to keep reports about spam messages
 // it writes json lines to the provided writer and returns the underlying
 // detected-spam store so callers can wire it into per-chat runtime context
-func makeSpamLogger(ctx context.Context, gid string, wr io.Writer, dataDB *engine.SQL) (events.SpamLogger, *storage.DetectedSpam, error) {
+func makeSpamLogger(ctx context.Context, gid string, wr io.Writer, dataDB *engine.SQL) (
+	events.SpamLogger, *storage.DetectedSpam, error,
+) {
 	// make store and load approved users
 	detectedSpamStore, auErr := storage.NewDetectedSpam(ctx, dataDB)
 	if auErr != nil {
