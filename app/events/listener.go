@@ -200,7 +200,7 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 	l.reportsHandler = &userReports{
 		ReportConfig: l.ReportConfig,
 		tbAPI:        l.TbAPI, bot: l.Bot, locator: l.Locator, superUsers: l.SuperUsers,
-		primChatID: l.chatID, adminChatID: l.adminChatID,
+		chats: adminChats, byGID: l.byGID, adminChatID: l.adminChatID,
 		trainingMode: l.TrainingMode, softBanMode: l.SoftBanMode, dry: l.Dry,
 	}
 
@@ -600,7 +600,7 @@ func (l *TelegramListener) isReportCommand(text string) bool {
 
 // procUserReply processes regular user commands (reply) /report.
 // feature check is intentionally inside this function to keep command detection logic centralized.
-func (l *TelegramListener) procUserReply(ctx context.Context, _ *ChatContext, update tbapi.Update) (handled bool) {
+func (l *TelegramListener) procUserReply(ctx context.Context, c *ChatContext, update tbapi.Update) (handled bool) {
 	switch {
 	case l.isReportCommand(update.Message.Text):
 		if !l.ReportConfig.Enabled {
@@ -609,7 +609,7 @@ func (l *TelegramListener) procUserReply(ctx context.Context, _ *ChatContext, up
 			return true // command is suppressed when feature is disabled
 		}
 		log.Printf("[DEBUG] user %s (%d) reported spam", update.Message.From.UserName, update.Message.From.ID)
-		if err := l.reportsHandler.DirectUserReport(ctx, update); err != nil {
+		if err := l.reportsHandler.DirectUserReport(ctx, c, update); err != nil {
 			log.Printf("[WARN] failed to process user spam report: %v", err)
 		}
 		return true

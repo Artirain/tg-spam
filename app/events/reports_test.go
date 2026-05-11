@@ -154,7 +154,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{"superuser"},
 			ReportConfig: ReportConfig{
@@ -179,7 +179,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.NoError(t, err)
 		assert.Len(t, mockAPI.RequestCalls(), 1, "should delete /report message")
 		assert.Len(t, mockReports.AddCalls(), 1, "should add report to storage")
@@ -192,7 +192,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:        mockAPI,
-			primChatID:   123,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID:  456,
 			superUsers:   SuperUsers{"superuser"},
 			ReportConfig: ReportConfig{Storage: mockReports},
@@ -212,7 +212,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "use /spam instead")
 		assert.Empty(t, mockAPI.RequestCalls(), "should not delete message")
@@ -225,7 +225,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:        mockAPI,
-			primChatID:   123,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID:  456,
 			superUsers:   SuperUsers{"superuser"},
 			ReportConfig: ReportConfig{Storage: mockReports},
@@ -245,7 +245,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "from super-user")
 		assert.Empty(t, mockAPI.RequestCalls(), "should not delete message")
@@ -258,7 +258,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:        mockAPI,
-			primChatID:   123,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID:  456,
 			superUsers:   SuperUsers{},
 			ReportConfig: ReportConfig{Storage: mockReports},
@@ -278,7 +278,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot report forum topic creation messages")
 		assert.Empty(t, mockAPI.RequestCalls(), "should not delete message")
@@ -307,7 +307,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{},
 			ReportConfig: ReportConfig{
@@ -331,7 +331,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rate limit exceeded")
 		assert.Len(t, mockAPI.RequestCalls(), 1, "should still delete /report message")
@@ -363,7 +363,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{},
 			ReportConfig: ReportConfig{
@@ -387,7 +387,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to add report")
 		assert.Len(t, mockAPI.RequestCalls(), 1, "should delete /report message")
@@ -423,7 +423,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{},
 			ReportConfig: ReportConfig{
@@ -450,7 +450,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.AddCalls(), 1, "should add report with transformed text")
 	})
@@ -461,7 +461,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:        mockAPI,
-			primChatID:   123,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID:  456,
 			superUsers:   SuperUsers{},
 			ReportConfig: ReportConfig{Storage: mockReports},
@@ -485,7 +485,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot report messages from channels or anonymous admins")
 		assert.Empty(t, mockAPI.RequestCalls(), "should not delete message")
@@ -508,7 +508,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{},
 			ReportConfig: ReportConfig{
@@ -532,7 +532,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reports storage not initialized")
 		assert.Len(t, mockAPI.RequestCalls(), 1, "should still delete /report message")
@@ -556,7 +556,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{},
 			ReportConfig: ReportConfig{
@@ -578,7 +578,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not in approved list")
 		assert.Len(t, mockAPI.RequestCalls(), 1, "should still delete /report message")
@@ -614,7 +614,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{},
 			ReportConfig: ReportConfig{
@@ -639,7 +639,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.NoError(t, err)
 		assert.Len(t, mockAPI.RequestCalls(), 1, "should delete /report message")
 		assert.Len(t, mockReports.AddCalls(), 1, "should add report")
@@ -671,7 +671,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		}
 
 		rep := &userReports{
-			tbAPI: mockAPI, bot: mockBot, primChatID: 123, adminChatID: 456,
+			tbAPI: mockAPI, bot: mockBot, chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456,
 			superUsers: SuperUsers{},
 			ReportConfig: ReportConfig{
 				Storage: mockReports, RateLimit: 10, RatePeriod: 1 * time.Hour, Threshold: 2,
@@ -690,7 +690,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.NoError(t, err)
 		require.Len(t, mockReports.AddCalls(), 1)
 	})
@@ -720,7 +720,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		}
 
 		rep := &userReports{
-			tbAPI: mockAPI, bot: mockBot, primChatID: 123, adminChatID: 456,
+			tbAPI: mockAPI, bot: mockBot, chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456,
 			superUsers: SuperUsers{},
 			ReportConfig: ReportConfig{
 				Storage: mockReports, RateLimit: 10, RatePeriod: 1 * time.Hour, Threshold: 2,
@@ -738,7 +738,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.NoError(t, err)
 		require.Len(t, mockReports.AddCalls(), 1)
 	})
@@ -768,7 +768,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		}
 
 		rep := &userReports{
-			tbAPI: mockAPI, bot: mockBot, primChatID: 123, adminChatID: 456,
+			tbAPI: mockAPI, bot: mockBot, chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456,
 			superUsers: SuperUsers{},
 			ReportConfig: ReportConfig{
 				Storage: mockReports, RateLimit: 10, RatePeriod: 1 * time.Hour, Threshold: 2,
@@ -787,7 +787,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.NoError(t, err)
 		require.Len(t, mockReports.AddCalls(), 1)
 	})
@@ -817,7 +817,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		}
 
 		rep := &userReports{
-			tbAPI: mockAPI, bot: mockBot, primChatID: 123, adminChatID: 456,
+			tbAPI: mockAPI, bot: mockBot, chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456,
 			superUsers: SuperUsers{},
 			ReportConfig: ReportConfig{
 				Storage: mockReports, RateLimit: 10, RatePeriod: 1 * time.Hour, Threshold: 2,
@@ -838,7 +838,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.NoError(t, err)
 		require.Len(t, mockReports.AddCalls(), 1)
 	})
@@ -851,7 +851,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{"superuser"},
 			ReportConfig: ReportConfig{
@@ -873,7 +873,7 @@ func TestUserReports_DirectUserReport(t *testing.T) {
 			},
 		}
 
-		err := rep.DirectUserReport(context.Background(), update)
+		err := rep.DirectUserReport(context.Background(), rep.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "use /spam instead")
 		assert.Empty(t, mockBot.IsApprovedUserCalls(), "should not check approved status for super-user")
@@ -897,7 +897,7 @@ func TestUserReports_CheckReportThreshold(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 1, "should query reports")
 	})
@@ -921,7 +921,7 @@ func TestUserReports_CheckReportThreshold(t *testing.T) {
 		}
 
 		// should call sendReportNotification (stub for now), verify no error
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 1, "should query reports")
 	})
@@ -946,7 +946,7 @@ func TestUserReports_CheckReportThreshold(t *testing.T) {
 		}
 
 		// should call updateReportNotification (stub for now), verify no error
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 1, "should query reports")
 	})
@@ -969,7 +969,7 @@ func TestUserReports_CheckReportThreshold(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 	})
 
@@ -981,7 +981,7 @@ func TestUserReports_CheckReportThreshold(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reports storage not initialized")
 	})
@@ -1000,7 +1000,7 @@ func TestUserReports_CheckReportThreshold(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to get reports")
 		assert.Contains(t, err.Error(), "database error")
@@ -1046,7 +1046,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			adminChatID: 456,
 			ReportConfig: ReportConfig{
 				Storage:          mockReports,
@@ -1055,7 +1055,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.Len(t, mockBot.RemoveApprovedUserCalls(), 1, "should remove from approved list")
 		assert.Len(t, mockBot.UpdateSpamCalls(), 1, "should update spam samples")
@@ -1103,7 +1103,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			adminChatID: 456,
 			softBanMode: true, // soft-ban enabled
 			ReportConfig: ReportConfig{
@@ -1113,7 +1113,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.True(t, banReqReceived.restrict, "should use restrict mode in soft-ban")
 		assert.Equal(t, int64(666), banReqReceived.userID, "should ban correct user")
@@ -1163,7 +1163,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			adminChatID: 456,
 			ReportConfig: ReportConfig{
 				Storage:          mockReports,
@@ -1172,7 +1172,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.Equal(t, 999, editedMsgID, "should edit existing notification")
 		assert.True(t, buttonsRemoved, "should remove buttons from notification")
@@ -1203,7 +1203,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:       mockAPI,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			adminChatID: 456,
 			ReportConfig: ReportConfig{
 				Storage:          mockReports,
@@ -1212,7 +1212,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.Len(t, mockAPI.SendCalls(), 1, "should send manual approval notification")
 	})
@@ -1250,7 +1250,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			adminChatID: 456,
 			dry:         true, // dry mode enabled
 			ReportConfig: ReportConfig{
@@ -1260,7 +1260,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.NoError(t, err)
 		assert.Empty(t, mockAPI.RequestCalls(), "should not make API requests in dry mode")
 		assert.Empty(t, mockBot.UpdateSpamCalls(), "should not update spam in dry mode")
@@ -1298,7 +1298,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			adminChatID: 456,
 			ReportConfig: ReportConfig{
 				Storage:          mockReports,
@@ -1307,7 +1307,7 @@ func TestUserReports_AutoBan(t *testing.T) {
 			},
 		}
 
-		err := rep.checkReportThreshold(context.Background(), 100, 200)
+		err := rep.checkReportThreshold(context.Background(), &ChatContext{GID: "default", PrimaryChatID: 200}, 100, 200)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "notification failed", "should indicate notification failure")
 		assert.Empty(t, mockReports.DeleteByMessageCalls(), "should not delete reports when notification fails")
@@ -1347,7 +1347,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: "spam message"},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Len(t, mockAPI.SendCalls(), 1, "should send message")
 		assert.Len(t, mockReports.UpdateAdminMsgIDCalls(), 1, "should update admin msg ID")
@@ -1399,7 +1399,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 333, ReporterUserName: "reporter3", MsgText: "spam message"},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Contains(t, sentMsg.Text, "User spam reported (3 reports)", "should contain report count")
 		assert.Contains(t, sentMsg.Text, "reporter1", "should contain first reporter")
@@ -1434,7 +1434,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: longMsg},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Contains(t, sentMsg.Text, "...", "should truncate long message")
 	})
@@ -1465,7 +1465,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "", MsgText: "spam"},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Contains(t, sentMsg.Text, "user111", "should use userID as fallback")
 	})
@@ -1484,7 +1484,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: "spam"},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Empty(t, mockAPI.SendCalls(), "should not send message")
 	})
@@ -1499,7 +1499,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
-		err := rep.sendReportNotification(context.Background(), []storage.Report{})
+		err := rep.sendReportNotification(context.Background(), nil, []storage.Report{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no reports provided")
 	})
@@ -1523,7 +1523,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: "spam"},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to send notification")
 		assert.Contains(t, err.Error(), "network error")
@@ -1553,7 +1553,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 		}
 
 		// should not fail even if UpdateAdminMsgID fails
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Len(t, mockAPI.SendCalls(), 1, "should still send message")
 		assert.Len(t, mockReports.UpdateAdminMsgIDCalls(), 1, "should attempt to update admin msg ID")
@@ -1587,7 +1587,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spam_user*bot", ReporterUserID: 222, ReporterUserName: "admin[test]", MsgText: "spam"},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 
 		// verify escaped characters in reported user name
@@ -1627,7 +1627,7 @@ func TestUserReports_SendReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: "short spam"},
 		}
 
-		err := rep.sendReportNotification(context.Background(), reports)
+		err := rep.sendReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 
 		// verify padding is present - U+2800 (braille pattern blank) for full-width buttons
@@ -1659,7 +1659,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 333, ReporterUserName: "reporter3", MsgText: "spam message", AdminMsgID: 888},
 		}
 
-		err := rep.updateReportNotification(context.Background(), reports)
+		err := rep.updateReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Len(t, mockAPI.SendCalls(), 1, "should edit message")
 		assert.Equal(t, int64(456), editedMsg.ChatID, "should edit in admin chat")
@@ -1705,7 +1705,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 222, ReporterUserName: "reporter2", MsgText: "spam message", AdminMsgID: 888},
 		}
 
-		err := rep.updateReportNotification(context.Background(), reports)
+		err := rep.updateReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Contains(t, editedMsg.Text, "User spam reported (2 reports)", "should update to 2 reports")
 		assert.Contains(t, editedMsg.Text, "reporter1", "should still contain first reporter")
@@ -1732,7 +1732,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: longMsg, AdminMsgID: 888},
 		}
 
-		err := rep.updateReportNotification(context.Background(), reports)
+		err := rep.updateReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Contains(t, editedMsg.Text, "...", "should truncate long message")
 		msgStart := strings.Index(editedMsg.Text, "spam")
@@ -1760,7 +1760,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "", MsgText: "spam", AdminMsgID: 888},
 		}
 
-		err := rep.updateReportNotification(context.Background(), reports)
+		err := rep.updateReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Contains(t, editedMsg.Text, "user111", "should use fallback username")
 	})
@@ -1782,7 +1782,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: "spam", AdminMsgID: 888},
 		}
 
-		err := rep.updateReportNotification(context.Background(), reports)
+		err := rep.updateReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 		assert.Empty(t, mockAPI.SendCalls(), "should not send message")
 	})
@@ -1792,7 +1792,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			adminChatID: 456,
 		}
 
-		err := rep.updateReportNotification(context.Background(), []storage.Report{})
+		err := rep.updateReportNotification(context.Background(), nil, []storage.Report{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reports list is empty")
 	})
@@ -1813,7 +1813,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spammer", ReporterUserID: 111, ReporterUserName: "reporter1", MsgText: "spam", AdminMsgID: 888},
 		}
 
-		err := rep.updateReportNotification(context.Background(), reports)
+		err := rep.updateReportNotification(context.Background(), nil, reports)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to edit admin notification")
 	})
@@ -1839,7 +1839,7 @@ func TestUserReports_UpdateReportNotification(t *testing.T) {
 			{MsgID: 100, ChatID: 200, ReportedUserID: 666, ReportedUserName: "spam_user*bot", ReporterUserID: 222, ReporterUserName: "admin[test]", MsgText: "spam", AdminMsgID: 888},
 		}
 
-		err := rep.updateReportNotification(context.Background(), reports)
+		err := rep.updateReportNotification(context.Background(), nil, reports)
 		require.NoError(t, err)
 
 		// verify escaped characters in reported user name
@@ -1884,7 +1884,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:        mockAPI,
 			adminChatID:  456,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 			bot:          mockBot,
 		}
@@ -1900,7 +1900,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 			},
 		}
 
-		err := rep.callbackReportBan(context.Background(), query)
+		err := rep.callbackReportBan(context.Background(), rep.chats[0], query)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 1)
 		assert.Len(t, mockReports.DeleteByMessageCalls(), 1)
@@ -1916,7 +1916,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 
 		rep := &userReports{
 			adminChatID:  456,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -1927,7 +1927,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 			},
 		}
 
-		err := rep.callbackReportBan(context.Background(), query)
+		err := rep.callbackReportBan(context.Background(), rep.chats[0], query)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no reports found")
 	})
@@ -1969,7 +1969,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			softBanMode: true, // soft-ban enabled
 			ReportConfig: ReportConfig{
 				Storage: mockReports,
@@ -1986,7 +1986,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 			},
 		}
 
-		err := rep.callbackReportBan(context.Background(), query)
+		err := rep.callbackReportBan(context.Background(), rep.chats[0], query)
 		require.NoError(t, err)
 		assert.True(t, banReqReceived.restrict, "should use restrict mode in soft-ban")
 		assert.Equal(t, int64(666), banReqReceived.userID, "should ban correct user")
@@ -2029,7 +2029,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 		rep := &userReports{
 			tbAPI:       mockAPI,
 			bot:         mockBot,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			softBanMode: false, // normal ban mode
 			ReportConfig: ReportConfig{
 				Storage: mockReports,
@@ -2046,7 +2046,7 @@ func TestUserReports_CallbackReportBan(t *testing.T) {
 			},
 		}
 
-		err := rep.callbackReportBan(context.Background(), query)
+		err := rep.callbackReportBan(context.Background(), rep.chats[0], query)
 		require.NoError(t, err)
 		assert.False(t, banReqReceived.restrict, "should use ban mode when soft-ban disabled")
 		assert.Equal(t, int64(666), banReqReceived.userID, "should ban correct user")
@@ -2075,7 +2075,7 @@ func TestUserReports_CallbackReportReject(t *testing.T) {
 		rep := &userReports{
 			tbAPI:        mockAPI,
 			adminChatID:  456,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2090,7 +2090,7 @@ func TestUserReports_CallbackReportReject(t *testing.T) {
 			},
 		}
 
-		err := rep.callbackReportReject(context.Background(), query)
+		err := rep.callbackReportReject(context.Background(), rep.chats[0], query)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 1)
 		assert.Len(t, mockReports.DeleteByMessageCalls(), 1)
@@ -2105,7 +2105,7 @@ func TestUserReports_CallbackReportReject(t *testing.T) {
 
 		rep := &userReports{
 			adminChatID:  456,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2116,7 +2116,7 @@ func TestUserReports_CallbackReportReject(t *testing.T) {
 			},
 		}
 
-		err := rep.callbackReportReject(context.Background(), query)
+		err := rep.callbackReportReject(context.Background(), rep.chats[0], query)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no reports found")
 	})
@@ -2152,7 +2152,7 @@ func TestUserReports_CallbackReportBanReporterAsk(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:        mockAPI,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2161,7 +2161,7 @@ func TestUserReports_CallbackReportBanReporterAsk(t *testing.T) {
 			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}, MessageID: 999},
 		}
 
-		err := rep.callbackReportBanReporterAsk(context.Background(), query)
+		err := rep.callbackReportBanReporterAsk(context.Background(), rep.chats[0], query)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 1)
 		assert.Len(t, mockAPI.SendCalls(), 1)
@@ -2174,10 +2174,10 @@ func TestUserReports_CallbackReportBanReporterAsk(t *testing.T) {
 			},
 		}
 
-		rep := &userReports{primChatID: 200, ReportConfig: ReportConfig{Storage: mockReports}}
+		rep := &userReports{chats: []*ChatContext{{GID: "default", PrimaryChatID: 200}}, ReportConfig: ReportConfig{Storage: mockReports}}
 		query := &tbapi.CallbackQuery{Data: "R?666:100", Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}}}
 
-		err := rep.callbackReportBanReporterAsk(context.Background(), query)
+		err := rep.callbackReportBanReporterAsk(context.Background(), rep.chats[0], query)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no reports found")
 	})
@@ -2215,7 +2215,7 @@ func TestUserReports_CallbackReportBanReporterConfirm(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:        mockAPI,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2225,7 +2225,7 @@ func TestUserReports_CallbackReportBanReporterConfirm(t *testing.T) {
 			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}, MessageID: 999, Text: "Test", Date: int(time.Now().Unix())},
 		}
 
-		err := rep.callbackReportBanReporterConfirm(context.Background(), query)
+		err := rep.callbackReportBanReporterConfirm(context.Background(), rep.chats[0], query)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 2)
 		assert.Len(t, mockReports.DeleteReporterCalls(), 1)
@@ -2262,7 +2262,7 @@ func TestUserReports_CallbackReportBanReporterConfirm(t *testing.T) {
 
 		rep := &userReports{
 			tbAPI:        mockAPI,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2272,7 +2272,7 @@ func TestUserReports_CallbackReportBanReporterConfirm(t *testing.T) {
 			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}, MessageID: 999, Text: "Test", Date: int(time.Now().Unix())},
 		}
 
-		err := rep.callbackReportBanReporterConfirm(context.Background(), query)
+		err := rep.callbackReportBanReporterConfirm(context.Background(), rep.chats[0], query)
 		require.NoError(t, err)
 		assert.Len(t, mockReports.GetByMessageCalls(), 2)
 		assert.Len(t, mockReports.DeleteReporterCalls(), 1)
@@ -2308,7 +2308,7 @@ func TestUserReports_CallbackReportCancel(t *testing.T) {
 			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}, MessageID: 999},
 		}
 
-		err := rep.callbackReportCancel(context.Background(), query)
+		err := rep.callbackReportCancel(context.Background(), nil, query)
 		require.NoError(t, err)
 		assert.Len(t, mockAPI.SendCalls(), 1)
 	})
@@ -2336,7 +2336,7 @@ func TestUserReports_HandleReportCallback_SecurityValidation(t *testing.T) {
 		rep := &userReports{
 			tbAPI:        mockAPI,
 			adminChatID:  456, // admin chat ID
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2380,7 +2380,7 @@ func TestUserReports_HandleReportCallback_SecurityValidation(t *testing.T) {
 		rep := &userReports{
 			tbAPI:        mockAPI,
 			adminChatID:  456, // admin chat ID
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2433,7 +2433,7 @@ func TestUserReports_HandleReportCallback_SecurityValidation(t *testing.T) {
 			tbAPI:        mockAPI,
 			bot:          mockBot,
 			adminChatID:  456,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2479,7 +2479,7 @@ func TestUserReports_HandleReportCallback_SecurityValidation(t *testing.T) {
 		rep := &userReports{
 			tbAPI:        mockAPI,
 			adminChatID:  456,
-			primChatID:   200,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 			ReportConfig: ReportConfig{Storage: mockReports},
 		}
 
@@ -2505,7 +2505,7 @@ func TestUserReports_HandleReportCallback_SecurityValidation(t *testing.T) {
 	t.Run("callback with invalid data format should return error", func(t *testing.T) {
 		rep := &userReports{
 			adminChatID: 456,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 		}
 
 		query := &tbapi.CallbackQuery{
@@ -2526,7 +2526,7 @@ func TestUserReports_HandleReportCallback_SecurityValidation(t *testing.T) {
 	t.Run("callback with unknown prefix should return error", func(t *testing.T) {
 		rep := &userReports{
 			adminChatID: 456,
-			primChatID:  200,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 200}},
 		}
 
 		query := &tbapi.CallbackQuery{

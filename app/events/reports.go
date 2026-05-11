@@ -42,15 +42,29 @@ type userReports struct {
 	bot          Bot
 	locator      Locator
 	superUsers   SuperUsers
-	primChatID   int64
+	chats        []*ChatContext          // primary group chats, also keyed in byGID
+	byGID        map[string]*ChatContext // gid → chat lookup; nil when running in legacy fallback
 	adminChatID  int64
 	trainingMode bool
 	softBanMode  bool
 	dry          bool
 }
 
+// defaultChat returns the first configured chat or nil if none are configured.
+// used as a fallback for callback handlers until callback data carries an
+// explicit gid.
+func (r *userReports) defaultChat() *ChatContext {
+	if len(r.chats) == 0 {
+		return nil
+	}
+	return r.chats[0]
+}
+
 // DirectUserReport handles messages replied with "/report" by regular users
-func (r *userReports) DirectUserReport(ctx context.Context, update tbapi.Update) error {
+func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, update tbapi.Update) error {
+	if c == nil {
+		return fmt.Errorf("chat context is required")
+	}
 	origMsg := update.Message.ReplyToMessage
 	if origMsg == nil {
 		return fmt.Errorf("must reply to a message to report it")
@@ -90,7 +104,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, update tbapi.Update)
 		// still delete the /report command to keep chat clean
 		_, _ = r.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 			MessageID:  update.Message.MessageID,
-			ChatConfig: tbapi.ChatConfig{ChatID: r.primChatID},
+			ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 		}})
 		return fmt.Errorf("reporter %d not in approved list", update.Message.From.ID)
 	}
@@ -105,7 +119,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, update tbapi.Update)
 		// still delete the /report command to keep chat clean
 		_, _ = r.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 			MessageID:  update.Message.MessageID,
-			ChatConfig: tbapi.ChatConfig{ChatID: r.primChatID},
+			ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 		}})
 		return fmt.Errorf("rate limit exceeded for reporter %d", update.Message.From.ID)
 	}
@@ -113,7 +127,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, update tbapi.Update)
 	// delete the /report command message immediately to keep chat clean
 	_, err = r.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 		MessageID:  update.Message.MessageID,
-		ChatConfig: tbapi.ChatConfig{ChatID: r.primChatID},
+		ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 	}})
 	if err != nil {
 		log.Printf("[WARN] failed to delete report message %d: %v", update.Message.MessageID, err)
@@ -139,7 +153,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, update tbapi.Update)
 	// create report
 	report := storage.Report{
 		MsgID:            origMsg.MessageID,
-		ChatID:           r.primChatID,
+		ChatID:           c.PrimaryChatID,
 		ReporterUserID:   update.Message.From.ID,
 		ReporterUserName: update.Message.From.UserName,
 		ReportedUserID:   origMsg.From.ID,
@@ -153,7 +167,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, update tbapi.Update)
 	}
 
 	// check if threshold reached
-	if err := r.checkReportThreshold(ctx, origMsg.MessageID, r.primChatID); err != nil {
+	if err := r.checkReportThreshold(ctx, c, origMsg.MessageID, c.PrimaryChatID); err != nil {
 		log.Printf("[WARN] failed to check report threshold: %v", err)
 	}
 
@@ -186,7 +200,7 @@ func (r *userReports) checkReportRateLimit(ctx context.Context, reporterID int64
 }
 
 // checkReportThreshold checks if report threshold is reached and sends admin notification if needed
-func (r *userReports) checkReportThreshold(ctx context.Context, msgID int, chatID int64) error {
+func (r *userReports) checkReportThreshold(ctx context.Context, c *ChatContext, msgID int, chatID int64) error {
 	if r.Storage == nil {
 		return fmt.Errorf("reports storage not initialized")
 	}
@@ -203,7 +217,7 @@ func (r *userReports) checkReportThreshold(ctx context.Context, msgID int, chatI
 	if r.AutoBanThreshold > 0 && reportCount >= r.AutoBanThreshold {
 		log.Printf("[INFO] auto-ban threshold reached for msgID:%d, chatID:%d: %d reports (threshold: %d)",
 			msgID, chatID, reportCount, r.AutoBanThreshold)
-		return r.executeAutoBan(ctx, reports)
+		return r.executeAutoBan(ctx, c, reports)
 	}
 
 	// check if manual approval threshold reached
@@ -221,16 +235,16 @@ func (r *userReports) checkReportThreshold(ctx context.Context, msgID int, chatI
 		// notification already sent, update it
 		log.Printf("[DEBUG] updating existing notification for msgID:%d, admin_msg_id:%d",
 			msgID, reports[0].AdminMsgID)
-		return r.updateReportNotification(ctx, reports)
+		return r.updateReportNotification(ctx, c, reports)
 	}
 
 	// no notification sent yet, send new one
 	log.Printf("[DEBUG] sending new notification for msgID:%d", msgID)
-	return r.sendReportNotification(ctx, reports)
+	return r.sendReportNotification(ctx, c, reports)
 }
 
 // executeAutoBan executes automatic ban when auto-ban threshold is reached
-func (r *userReports) executeAutoBan(ctx context.Context, reports []storage.Report) error {
+func (r *userReports) executeAutoBan(ctx context.Context, c *ChatContext, reports []storage.Report) error {
 	if len(reports) == 0 {
 		return fmt.Errorf("no reports provided")
 	}
@@ -292,10 +306,10 @@ func (r *userReports) executeAutoBan(ctx context.Context, reports []storage.Repo
 	if r.adminChatID != 0 {
 		if len(reports) > 0 && reports[0].NotificationSent {
 			// notification already sent (manual threshold reached earlier), update it
-			notificationErr = r.updateNotificationForAutoBan(reports)
+			notificationErr = r.updateNotificationForAutoBan(c, reports)
 		} else {
 			// no previous notification, send new one
-			notificationErr = r.sendAutoBanNotification(reports)
+			notificationErr = r.sendAutoBanNotification(c, reports)
 		}
 
 		if notificationErr != nil {
@@ -316,7 +330,7 @@ func (r *userReports) executeAutoBan(ctx context.Context, reports []storage.Repo
 }
 
 // sendAutoBanNotification sends notification to admin chat about automatic ban
-func (r *userReports) sendAutoBanNotification(reports []storage.Report) error {
+func (r *userReports) sendAutoBanNotification(_ *ChatContext, reports []storage.Report) error {
 	if len(reports) == 0 {
 		return fmt.Errorf("no reports provided")
 	}
@@ -368,7 +382,7 @@ func (r *userReports) sendAutoBanNotification(reports []storage.Report) error {
 
 // updateNotificationForAutoBan updates existing admin notification when auto-ban is executed
 // this prevents leaving orphaned notifications with live buttons that would fail on click
-func (r *userReports) updateNotificationForAutoBan(reports []storage.Report) error {
+func (r *userReports) updateNotificationForAutoBan(_ *ChatContext, reports []storage.Report) error {
 	if len(reports) == 0 {
 		return fmt.Errorf("reports list is empty")
 	}
@@ -429,7 +443,7 @@ func (r *userReports) updateNotificationForAutoBan(reports []storage.Report) err
 }
 
 // sendReportNotification sends a new admin notification for user reports
-func (r *userReports) sendReportNotification(ctx context.Context, reports []storage.Report) error {
+func (r *userReports) sendReportNotification(ctx context.Context, _ *ChatContext, reports []storage.Report) error {
 	if len(reports) == 0 {
 		return fmt.Errorf("no reports provided")
 	}
@@ -505,7 +519,7 @@ func (r *userReports) sendReportNotification(ctx context.Context, reports []stor
 }
 
 // updateReportNotification updates existing admin notification when new reports come in after threshold reached
-func (r *userReports) updateReportNotification(_ context.Context, reports []storage.Report) error {
+func (r *userReports) updateReportNotification(_ context.Context, _ *ChatContext, reports []storage.Report) error {
 	// validate reports list
 	if len(reports) == 0 {
 		return fmt.Errorf("reports list is empty")
@@ -576,7 +590,10 @@ func (r *userReports) updateReportNotification(_ context.Context, reports []stor
 
 // callbackReportBan handles the callback when admin approves a user report and bans the reported user
 // callback data: R+reportedUserID:msgID
-func (r *userReports) callbackReportBan(ctx context.Context, query *tbapi.CallbackQuery) error {
+func (r *userReports) callbackReportBan(ctx context.Context, c *ChatContext, query *tbapi.CallbackQuery) error {
+	if c == nil {
+		return fmt.Errorf("chat context is required")
+	}
 	// parse callback data
 	reportedUserID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
@@ -584,7 +601,7 @@ func (r *userReports) callbackReportBan(ctx context.Context, query *tbapi.Callba
 	}
 
 	// get reports from database to find chatID and message text
-	reports, err := r.Storage.GetByMessage(ctx, msgID, r.primChatID)
+	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -656,7 +673,10 @@ func (r *userReports) callbackReportBan(ctx context.Context, query *tbapi.Callba
 
 // callbackReportReject handles the callback when admin rejects a user report
 // callback data: R-reportedUserID:msgID
-func (r *userReports) callbackReportReject(ctx context.Context, query *tbapi.CallbackQuery) error {
+func (r *userReports) callbackReportReject(ctx context.Context, c *ChatContext, query *tbapi.CallbackQuery) error {
+	if c == nil {
+		return fmt.Errorf("chat context is required")
+	}
 	// parse callback data
 	_, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
@@ -664,7 +684,7 @@ func (r *userReports) callbackReportReject(ctx context.Context, query *tbapi.Cal
 	}
 
 	// get chatID from reports
-	reports, err := r.Storage.GetByMessage(ctx, msgID, r.primChatID)
+	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -694,7 +714,10 @@ func (r *userReports) callbackReportReject(ctx context.Context, query *tbapi.Cal
 
 // callbackReportBanReporterAsk handles the callback when admin wants to ban a reporter (show confirmation)
 // callback data: R?reportedUserID:msgID
-func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, query *tbapi.CallbackQuery) error {
+func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, c *ChatContext, query *tbapi.CallbackQuery) error {
+	if c == nil {
+		return fmt.Errorf("chat context is required")
+	}
 	// parse callback data
 	reportedUserID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
@@ -702,7 +725,7 @@ func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, query *t
 	}
 
 	// get all reports for this message
-	reports, err := r.Storage.GetByMessage(ctx, msgID, r.primChatID)
+	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -748,7 +771,10 @@ func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, query *t
 
 // callbackReportBanReporterConfirm handles the callback when admin confirms banning a specific reporter
 // callback data: R!reporterID:msgID
-func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, query *tbapi.CallbackQuery) error {
+func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, c *ChatContext, query *tbapi.CallbackQuery) error {
+	if c == nil {
+		return fmt.Errorf("chat context is required")
+	}
 	// parse callback data
 	reporterID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
@@ -756,7 +782,7 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, quer
 	}
 
 	// get reports to find chatID and reporter details
-	reports, err := r.Storage.GetByMessage(ctx, msgID, r.primChatID)
+	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -798,7 +824,7 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, quer
 	}
 
 	// get remaining reports
-	remainingReports, err := r.Storage.GetByMessage(ctx, msgID, r.primChatID)
+	remainingReports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		log.Printf("[WARN] failed to get remaining reports for msgID:%d: %v", msgID, err)
 	}
@@ -872,7 +898,7 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, quer
 
 // callbackReportCancel handles the callback when admin cancels ban reporter action
 // callback data: RXreportedUserID:msgID
-func (r *userReports) callbackReportCancel(_ context.Context, query *tbapi.CallbackQuery) error {
+func (r *userReports) callbackReportCancel(_ context.Context, _ *ChatContext, query *tbapi.CallbackQuery) error {
 	// parse callback data
 	reportedUserID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
@@ -915,17 +941,23 @@ func (r *userReports) HandleReportCallback(ctx context.Context, query *tbapi.Cal
 		return fmt.Errorf("invalid callback data: %s", callbackData)
 	}
 
+	// resolve chat via defaultChat until callback data carries an explicit gid
+	c := r.defaultChat()
+	if c == nil {
+		return fmt.Errorf("no chat configured for report callback %s", callbackData)
+	}
+
 	switch callbackData[:2] {
 	case "R+": // approve ban
-		return r.callbackReportBan(ctx, query)
+		return r.callbackReportBan(ctx, c, query)
 	case "R-": // reject report
-		return r.callbackReportReject(ctx, query)
+		return r.callbackReportReject(ctx, c, query)
 	case "R?": // ban reporter - show confirmation
-		return r.callbackReportBanReporterAsk(ctx, query)
+		return r.callbackReportBanReporterAsk(ctx, c, query)
 	case "R!": // ban specific reporter
-		return r.callbackReportBanReporterConfirm(ctx, query)
+		return r.callbackReportBanReporterConfirm(ctx, c, query)
 	case "RX": // cancel ban reporter
-		return r.callbackReportCancel(ctx, query)
+		return r.callbackReportCancel(ctx, c, query)
 	default:
 		return fmt.Errorf("unknown report callback: %s", callbackData)
 	}
