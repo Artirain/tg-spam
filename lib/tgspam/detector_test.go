@@ -3474,6 +3474,54 @@ func TestDetector_ShortMessageApproval(t *testing.T) {
 		// IsApprovedUser returns false because count (2) is not > FirstMessagesCount (2)
 		assert.False(t, d.IsApprovedUser("111"))
 	})
+
+	t.Run("short messages cleared as ham by LLM still don't count towards approval", func(t *testing.T) {
+		// guards against approving a user when the LLM (with CheckShortMessagesWithOpenAI=true)
+		// returns ham for a short message - the message is still too short to be a "real check",
+		// so the approval counter must NOT increment and storage must NOT be written
+		mockUserStore := &mocks.UserStorageMock{
+			ReadFunc: func(context.Context) ([]approved.UserInfo, error) {
+				return []approved.UserInfo{}, nil
+			},
+			WriteFunc:  func(_ context.Context, au approved.UserInfo) error { return nil },
+			DeleteFunc: func(_ context.Context, id string) error { return nil },
+		}
+		mockOpenAIClient := &mocks.OpenAIClientMock{
+			CreateChatCompletionFunc: func(ctx context.Context, req openai.ChatCompletionRequest) (openai.ChatCompletionResponse, error) {
+				return openai.ChatCompletionResponse{
+					Choices: []openai.ChatCompletionChoice{{
+						Message: openai.ChatCompletionMessage{Content: `{"spam": false, "reason":"looks fine", "confidence":40}`},
+					}},
+				}, nil
+			},
+		}
+
+		d := NewDetector(Config{MinMsgLen: 50, FirstMessagesCount: 2, FirstMessageOnly: true, MaxAllowedEmoji: -1})
+		_, err := d.WithUserStorage(mockUserStore)
+		require.NoError(t, err)
+		d.WithOpenAIChecker(mockOpenAIClient, OpenAIConfig{Model: "gpt4", CheckShortMessagesWithOpenAI: true})
+
+		// send 3 short messages, LLM clears each as ham
+		for range 3 {
+			spam, _ := d.Check(spamcheck.Request{Msg: "hi", UserID: "222"})
+			assert.False(t, spam)
+		}
+
+		// LLM was called 3 times (once per short message)
+		assert.Len(t, mockOpenAIClient.CreateChatCompletionCalls(), 3)
+
+		// approval counter must remain at 0 in memory
+		d.lock.RLock()
+		actualCount := d.approvedUsers["222"].Count
+		d.lock.RUnlock()
+		assert.Equal(t, 0, actualCount, "short messages cleared by LLM must not increment approval counter")
+
+		// user must not be approved
+		assert.False(t, d.IsApprovedUser("222"))
+
+		// storage must not be written for short messages even when LLM cleared them
+		assert.Empty(t, mockUserStore.WriteCalls(), "storage must not be written for short messages even when LLM clears them")
+	})
 }
 
 func TestDetectorRecordReaction(t *testing.T) {
@@ -3622,4 +3670,222 @@ func TestDetector_Reset_PropagatesAcrossSharedDetectors(t *testing.T) {
 	// per-detector state on d2 survives d1.Reset
 	assert.True(t, d2.IsApprovedUser("777"),
 		"d1.Reset must NOT touch d2's per-detector approved users")
+}
+
+func TestDetector_MaxShortMsgCount(t *testing.T) {
+	// short message used across subtests; len("hi")=2 stays below MinMsgLen=50.
+	const shortMsg = "hi"
+
+	newCounter := func(count int, ids []int) *mocks.MessageCounterMock {
+		return &mocks.MessageCounterMock{
+			CountUserMessagesFunc: func(ctx context.Context, userID string) (int, error) { return count, nil },
+			UserMessageIDsFunc:    func(ctx context.Context, userID string, limit int) ([]int, error) { return ids, nil },
+		}
+	}
+
+	t.Run("disabled when threshold is 0", func(t *testing.T) {
+		mc := newCounter(100, []int{1, 2, 3})
+		d := NewDetector(Config{MaxShortMsgCount: 0, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		spam, cr := d.Check(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.False(t, spam)
+		assert.Empty(t, mc.CountUserMessagesCalls(), "locator must not be queried when feature disabled")
+		assert.Nil(t, findResponseByName(cr, "short-msg-flood"), "no flood marker when disabled")
+	})
+
+	t.Run("disabled when no MessageCounter wired", func(t *testing.T) {
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		spam, cr := d.Check(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.False(t, spam)
+		assert.Nil(t, findResponseByName(cr, "short-msg-flood"))
+	})
+
+	t.Run("disabled when no first-message mode", func(t *testing.T) {
+		mc := newCounter(100, []int{1, 2, 3})
+		d := NewDetector(Config{MaxShortMsgCount: 3, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		spam, cr := d.Check(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.False(t, spam)
+		assert.Empty(t, mc.CountUserMessagesCalls(), "outer guard must skip locator when first-message mode is off")
+		assert.Nil(t, findResponseByName(cr, "short-msg-flood"))
+	})
+
+	t.Run("triggers on threshold from unapproved user", func(t *testing.T) {
+		mc := newCounter(3, []int{30, 31, 32})
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		spam, cr := d.Check(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.True(t, spam)
+		resp := findResponseByName(cr, "short-msg-flood")
+		require.NotNil(t, resp)
+		assert.True(t, resp.Spam)
+		assert.Equal(t, "3 messages without approval (threshold 3)", resp.Details)
+		assert.Equal(t, []int{30, 31, 32}, resp.ExtraDeleteIDs)
+	})
+
+	t.Run("triggers on Nth message in pipeline", func(t *testing.T) {
+		var counter int
+		var idsRequested int
+		mc := &mocks.MessageCounterMock{
+			CountUserMessagesFunc: func(ctx context.Context, userID string) (int, error) {
+				counter++
+				return counter, nil
+			},
+			UserMessageIDsFunc: func(ctx context.Context, userID string, limit int) ([]int, error) {
+				idsRequested = limit
+				// the real locator includes the just-stored current message
+				ids := make([]int, 0, counter)
+				for i := 1; i <= counter; i++ {
+					ids = append(ids, i*10)
+				}
+				return ids, nil
+			},
+		}
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+
+		// 1st short message: count=1, excess=1 < 3 → ham
+		spam, _ := d.Check(spamcheck.Request{Msg: "hi", UserID: "999", Meta: spamcheck.MetaData{MessageID: 10}})
+		assert.False(t, spam)
+
+		// 2nd short message: count=2, excess=2 < 3 → ham
+		spam, _ = d.Check(spamcheck.Request{Msg: "yo", UserID: "999", Meta: spamcheck.MetaData{MessageID: 20}})
+		assert.False(t, spam)
+
+		// 3rd short message: count=3, excess=3 == threshold → spam
+		spam, cr := d.Check(spamcheck.Request{Msg: "ok", UserID: "999", Meta: spamcheck.MetaData{MessageID: 30}})
+		assert.True(t, spam)
+		resp := findResponseByName(cr, "short-msg-flood")
+		require.NotNil(t, resp)
+		assert.True(t, resp.Spam)
+		assert.Equal(t, []int{10, 20}, resp.ExtraDeleteIDs,
+			"prior message IDs are queued for cleanup; the triggering ID is filtered out")
+		assert.Equal(t, 6, idsRequested, "limit passed to UserMessageIDs is 2*MaxShortMsgCount")
+	})
+
+	t.Run("filters triggering message ID from ExtraDeleteIDs", func(t *testing.T) {
+		mc := newCounter(3, []int{30, 20, 10}) // newest first, includes current 30
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		resp := d.isShortMsgFlood(spamcheck.Request{Msg: shortMsg, UserID: "123", Meta: spamcheck.MetaData{MessageID: 30}})
+		assert.True(t, resp.Spam)
+		assert.Equal(t, []int{20, 10}, resp.ExtraDeleteIDs, "current message ID 30 is filtered out")
+	})
+
+	t.Run("does not trigger on long message", func(t *testing.T) {
+		mc := newCounter(100, []int{1, 2, 3})
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 10, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		spam, cr := d.Check(spamcheck.Request{Msg: "this is definitely longer than ten runes", UserID: "123"})
+		assert.False(t, spam)
+		assert.Empty(t, mc.CountUserMessagesCalls(), "long message must skip the locator query")
+		assert.Nil(t, findResponseByName(cr, "short-msg-flood"))
+	})
+
+	t.Run("approved user short-circuited by pre-approved branch", func(t *testing.T) {
+		mc := newCounter(100, []int{1, 2, 3})
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		require.NoError(t, d.AddApprovedUser(approved.UserInfo{UserID: "123", UserName: "ham"}))
+		spam, cr := d.Check(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.False(t, spam)
+		assert.NotNil(t, findResponseByName(cr, "pre-approved"))
+		assert.Empty(t, mc.CountUserMessagesCalls(), "pre-approved user must not reach the flood check")
+	})
+
+	t.Run("isShortMsgFlood approved fast-bail", func(t *testing.T) {
+		// direct method call exercising the defensive fast-bail
+		// (in normal pipeline the outer pre-approved branch fires first)
+		mc := newCounter(100, []int{1, 2, 3})
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		d.approvedUsers["123"] = approved.UserInfo{UserID: "123", Count: 5}
+		resp := d.isShortMsgFlood(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.False(t, resp.Spam)
+		assert.Equal(t, "user already approved", resp.Details)
+		assert.Empty(t, mc.CountUserMessagesCalls())
+	})
+
+	t.Run("formula excess = total - approvedCount", func(t *testing.T) {
+		cases := []struct {
+			name           string
+			total          int
+			approvedCount  int
+			threshold      int
+			firstMsgsCount int
+			expectSpam     bool
+		}{
+			{"below threshold", 2, 0, 3, 2, false},
+			{"exactly threshold", 3, 0, 3, 2, true},
+			{"above threshold", 5, 0, 3, 2, true},
+			{"with approved offset, below", 4, 2, 3, 5, false},
+			{"with approved offset, exact", 5, 2, 3, 5, true},
+			{"excess zero (total equals approved)", 4, 4, 3, 10, false},
+			{"approvedCount exceeds total (defensive)", 1, 3, 3, 5, false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				mc := newCounter(tc.total, []int{1, 2, 3})
+				d := NewDetector(Config{
+					MaxShortMsgCount: tc.threshold, FirstMessagesCount: tc.firstMsgsCount,
+					FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1,
+				})
+				d.WithMessageCounter(mc)
+				if tc.approvedCount > 0 {
+					d.approvedUsers["123"] = approved.UserInfo{UserID: "123", Count: tc.approvedCount}
+				}
+				resp := d.isShortMsgFlood(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+				assert.Equal(t, tc.expectSpam, resp.Spam, "details=%q", resp.Details)
+			})
+		}
+	})
+
+	t.Run("locator count error falls through", func(t *testing.T) {
+		mc := &mocks.MessageCounterMock{
+			CountUserMessagesFunc: func(ctx context.Context, userID string) (int, error) {
+				return 0, errors.New("db down")
+			},
+			UserMessageIDsFunc: func(ctx context.Context, userID string, limit int) ([]int, error) {
+				return nil, errors.New("not called")
+			},
+		}
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		spam, cr := d.Check(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.False(t, spam, "locator error must not produce spam=true")
+		assert.Nil(t, findResponseByName(cr, "short-msg-flood"))
+		assert.Empty(t, mc.UserMessageIDsCalls(), "ids must not be requested when count errored")
+	})
+
+	t.Run("ids fetch error keeps spam but empty extras", func(t *testing.T) {
+		mc := &mocks.MessageCounterMock{
+			CountUserMessagesFunc: func(ctx context.Context, userID string) (int, error) { return 5, nil },
+			UserMessageIDsFunc: func(ctx context.Context, userID string, limit int) ([]int, error) {
+				return nil, errors.New("ids fetch failed")
+			},
+		}
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		resp := d.isShortMsgFlood(spamcheck.Request{Msg: shortMsg, UserID: "123"})
+		assert.True(t, resp.Spam)
+		assert.Empty(t, resp.ExtraDeleteIDs)
+	})
+
+	t.Run("CheckOnly request skipped", func(t *testing.T) {
+		mc := newCounter(100, []int{1, 2, 3})
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		resp := d.isShortMsgFlood(spamcheck.Request{Msg: shortMsg, UserID: "123", CheckOnly: true})
+		assert.False(t, resp.Spam)
+		assert.Empty(t, mc.CountUserMessagesCalls())
+	})
+
+	t.Run("empty UserID skipped", func(t *testing.T) {
+		mc := newCounter(100, []int{1, 2, 3})
+		d := NewDetector(Config{MaxShortMsgCount: 3, FirstMessagesCount: 2, FirstMessageOnly: true, MinMsgLen: 50, MaxAllowedEmoji: -1})
+		d.WithMessageCounter(mc)
+		resp := d.isShortMsgFlood(spamcheck.Request{Msg: shortMsg, UserID: ""})
+		assert.False(t, resp.Spam)
+		assert.Empty(t, mc.CountUserMessagesCalls())
+	})
 }
