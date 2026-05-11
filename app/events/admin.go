@@ -57,14 +57,15 @@ func (a *admin) defaultChat() *ChatContext {
 }
 
 // resolveCallbackChat resolves a ChatContext from a callback-encoded gid.
-// gid="" falls back to chats[0] in single-chat mode; multi-chat mode rejects
-// the callback with an error so legacy two-part payloads never silently route
-// to the wrong group.
+// single-chat mode is unambiguous and always routes to chats[0] regardless of
+// the gid value (covers legacy two-part payloads and the synthesized "default"
+// ctx that is never registered in byGID). multi-chat mode rejects empty gid
+// and unknown gids so callbacks never silently route to the wrong group.
 func (a *admin) resolveCallbackChat(gid string) (*ChatContext, error) {
+	if len(a.chats) == 1 {
+		return a.chats[0], nil
+	}
 	if gid == "" {
-		if len(a.chats) == 1 {
-			return a.chats[0], nil
-		}
 		return nil, fmt.Errorf("legacy callback without gid in multi-chat mode")
 	}
 	c, ok := a.byGID[gid]

@@ -2571,10 +2571,18 @@ func TestUserReports_resolveCallbackChat(t *testing.T) {
 	})
 
 	t.Run("unknown gid is rejected", func(t *testing.T) {
-		r := &userReports{chats: []*ChatContext{chatA}, byGID: map[string]*ChatContext{"ga": chatA}}
+		r := &userReports{chats: []*ChatContext{chatA, chatB}, byGID: map[string]*ChatContext{"ga": chatA, "gb": chatB}}
 		_, err := r.resolveCallbackChat("missing")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown gid in callback")
+	})
+
+	t.Run("single-chat returns chats[0] regardless of gid value", func(t *testing.T) {
+		// covers the synthesized "default" ctx that is never registered in byGID
+		r := &userReports{chats: []*ChatContext{chatA}, byGID: map[string]*ChatContext{"ga": chatA}}
+		c, err := r.resolveCallbackChat("stale-gid")
+		require.NoError(t, err)
+		assert.Same(t, chatA, c)
 	})
 }
 

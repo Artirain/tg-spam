@@ -417,8 +417,11 @@ func parseCallbackData(data string) (gid string, userID int64, msgID int, err er
 	// check for two-char report prefixes first (R+, R-, R?, R!, RX), then admin prefixes
 	switch data[:1] {
 	case "R":
-		// two-char report prefix
-		data = data[2:]
+		// two-char report prefix only when the second character is a known marker;
+		// otherwise the leading R belongs to a gid such as "Russia"
+		if len(data) >= 2 && strings.ContainsRune("+-?!X", rune(data[1])) {
+			data = data[2:]
+		}
 	case "?", "+", "!":
 		// single-char admin prefix
 		data = data[1:]

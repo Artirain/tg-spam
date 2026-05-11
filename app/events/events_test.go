@@ -910,6 +910,9 @@ func Test_parseCallbackData(t *testing.T) {
 		{"three-part with report ban-reporter confirm prefix", "R!gid2:12345:678", "gid2", 12345, 678, false},
 		{"three-part with report cancel prefix", "RXgid2:12345:678", "gid2", 12345, 678, false},
 		{"three-part negative channel ID with gid", "?g1:-100123456:678", "g1", -100123456, 678, false},
+		{"R-starting gid no prefix preserves gid", "Russia:12345:678", "Russia", 12345, 678, false},
+		{"R-starting gid with admin ? prefix", "?Russia:12345:678", "Russia", 12345, 678, false},
+		{"R-starting gid with report R+ prefix", "R+Russia:12345:678", "Russia", 12345, 678, false},
 		{"too many parts", "a:b:c:d", "", 0, 0, true},
 	}
 
