@@ -440,7 +440,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 		c = ctx
 	}
 	if fromChat != c.PrimaryChatID && !slices.Contains(l.TestingIDs, fromChat) {
-		log.Printf("[WARN] procEvents fromChat=%d does not match ctx PrimaryChatID=%d, skipped", fromChat, c.PrimaryChatID)
+		log.Printf("[WARN] %sprocEvents fromChat=%d does not match ctx PrimaryChatID=%d, skipped", gidTag(c), fromChat, c.PrimaryChatID)
 		return nil
 	}
 
@@ -463,7 +463,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 		locatorUserName = msg.SenderChat.UserName
 	}
 	if err := c.Locator.AddMessage(ctx, msg.Text, fromChat, locatorUserID, locatorUserName, msg.ID); err != nil {
-		log.Printf("[WARN] failed to add message to locator: %v", err)
+		log.Printf("[WARN] %sfailed to add message to locator: %v", gidTag(c), err)
 	}
 
 	// skip spam check for anonymous admin posts from this group or from the linked channel.
@@ -483,7 +483,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 	// send response to the channel if allowed
 	if resp.Send && !l.NoSpamReply && !l.TrainingMode {
 		if err := l.sendBotResponse(resp, fromChat, NotificationSilent); err != nil {
-			log.Printf("[WARN] failed to respond on update, %v", err)
+			log.Printf("[WARN] %sfailed to respond on update, %v", gidTag(c), err)
 		}
 	}
 
@@ -498,7 +498,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 			spamUserID = msg.SenderChat.ID
 		}
 		if err := c.Locator.AddSpam(ctx, spamUserID, resp.CheckResults); err != nil {
-			log.Printf("[WARN] failed to add spam to locator: %v", err)
+			log.Printf("[WARN] %sfailed to add spam to locator: %v", gidTag(c), err)
 		}
 		banUserStr := l.getBanUsername(resp, update)
 
@@ -631,8 +631,8 @@ func (l *TelegramListener) procNewChatMemberMessage(c *ChatContext, update tbapi
 		c = ctx
 	}
 	if fromChat != c.PrimaryChatID && !slices.Contains(l.TestingIDs, fromChat) {
-		log.Printf("[WARN] procNewChatMemberMessage fromChat=%d does not match ctx PrimaryChatID=%d, skipped",
-			fromChat, c.PrimaryChatID)
+		log.Printf("[WARN] %sprocNewChatMemberMessage fromChat=%d does not match ctx PrimaryChatID=%d, skipped",
+			gidTag(c), fromChat, c.PrimaryChatID)
 		return nil
 	}
 
@@ -666,8 +666,8 @@ func (l *TelegramListener) procLeftChatMemberMessage(c *ChatContext, update tbap
 		c = ctx
 	}
 	if fromChat != c.PrimaryChatID && !slices.Contains(l.TestingIDs, fromChat) {
-		log.Printf("[WARN] procLeftChatMemberMessage fromChat=%d does not match ctx PrimaryChatID=%d, skipped",
-			fromChat, c.PrimaryChatID)
+		log.Printf("[WARN] %sprocLeftChatMemberMessage fromChat=%d does not match ctx PrimaryChatID=%d, skipped",
+			gidTag(c), fromChat, c.PrimaryChatID)
 		return nil
 	}
 
@@ -961,7 +961,7 @@ func (l *TelegramListener) procReaction(ctx context.Context, c *ChatContext, r *
 	}
 
 	if err := c.Locator.AddSpam(ctx, r.User.ID, resp.CheckResults); err != nil {
-		log.Printf("[WARN] failed to add reaction spam to locator: %v", err)
+		log.Printf("[WARN] %sfailed to add reaction spam to locator: %v", gidTag(c), err)
 	}
 	c.SpamLogger.Save(&bot.Message{From: resp.User, Text: "[reaction spam]"}, &resp)
 
@@ -984,7 +984,7 @@ func (l *TelegramListener) procReaction(ctx context.Context, c *ChatContext, r *
 		}
 		notif := tbapi.NewMessage(l.adminChatID, notifText)
 		if _, err := l.TbAPI.Send(notif); err != nil {
-			log.Printf("[WARN] failed to send reaction ban notification: %v", err)
+			log.Printf("[WARN] %sfailed to send reaction ban notification: %v", gidTag(c), err)
 		}
 	}
 	return nil

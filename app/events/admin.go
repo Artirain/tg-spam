@@ -148,7 +148,7 @@ func (a *admin) ReportBan(c *ChatContext, banUserStr string, msg *bot.Message) {
 		gid = c.GID
 	}
 	if err := a.sendWithUnbanMarkup(forwardMsg, "change ban", gid, callbackUser, msg.ID, a.adminChatID); err != nil {
-		log.Printf("[WARN] failed to send admin message, %v", err)
+		log.Printf("[WARN] %sfailed to send admin message, %v", gidTag(c), err)
 	}
 }
 
@@ -262,13 +262,13 @@ func (a *admin) MsgHandler(update tbapi.Update) error {
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", info.MsgID, err))
 	} else {
-		log.Printf("[INFO] message %d deleted", info.MsgID)
+		log.Printf("[INFO] %smessage %d deleted", gidTag(c), info.MsgID)
 	}
 
 	// skip ban for anonymous admin posts - the locator may store them with the group's own chat ID,
 	// and banning that would attempt to ban the group from posting in itself
 	if info.UserID == c.PrimaryChatID {
-		log.Printf("[WARN] skipping ban in MsgHandler, user ID %d matches group chat", c.PrimaryChatID)
+		log.Printf("[WARN] %sskipping ban in MsgHandler, user ID %d matches group chat", gidTag(c), c.PrimaryChatID)
 	} else {
 		banReq := banRequest{duration: bot.PermanentBanDuration, userID: info.UserID,
 			channelID: channelIDFromCallback(info.UserID),
@@ -410,7 +410,7 @@ func (a *admin) DirectWarnReport(c *ChatContext, update tbapi.Update) error {
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", origMsg.MessageID, err))
 	} else {
-		log.Printf("[INFO] warn message %d deleted", origMsg.MessageID)
+		log.Printf("[INFO] %swarn message %d deleted", gidTag(c), origMsg.MessageID)
 	}
 
 	// delete reply message
@@ -421,7 +421,7 @@ func (a *admin) DirectWarnReport(c *ChatContext, update tbapi.Update) error {
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", update.Message.MessageID, err))
 	} else {
-		log.Printf("[INFO] admin warn reprot message %d deleted", update.Message.MessageID)
+		log.Printf("[INFO] %sadmin warn reprot message %d deleted", gidTag(c), update.Message.MessageID)
 	}
 
 	// make a warning message and replay to origMsg.MessageID
@@ -499,12 +499,12 @@ func (a *admin) trackWarnAndMaybeBan(c *ChatContext, origMsg *tbapi.Message) err
 	}
 	ctx := context.TODO()
 	if err := c.Warnings.Add(ctx, target.userID, target.userName); err != nil {
-		log.Printf("[WARN] failed to record warn for %q (%d): %v", target.userName, target.userID, err)
+		log.Printf("[WARN] %sfailed to record warn for %q (%d): %v", gidTag(c), target.userName, target.userID, err)
 		return nil
 	}
 	count, err := c.Warnings.CountWithin(ctx, target.userID, a.warnWindow)
 	if err != nil {
-		log.Printf("[WARN] failed to count warns for %q (%d): %v", target.userName, target.userID, err)
+		log.Printf("[WARN] %sfailed to count warns for %q (%d): %v", gidTag(c), target.userName, target.userID, err)
 		return nil
 	}
 	if count < a.warnThreshold {
@@ -517,8 +517,8 @@ func (a *admin) trackWarnAndMaybeBan(c *ChatContext, origMsg *tbapi.Message) err
 // it respects dry, training, and softBan modes, and posts an admin-chat notification.
 // it does not update spam samples - a warn is not necessarily spam content.
 func (a *admin) executeWarnBan(c *ChatContext, target warnTarget, count int) error {
-	log.Printf("[INFO] warn auto-ban triggered for %q (%d): %d warns within %v",
-		target.userName, target.userID, count, a.warnWindow)
+	log.Printf("[INFO] %swarn auto-ban triggered for %q (%d): %d warns within %v",
+		gidTag(c), target.userName, target.userID, count, a.warnWindow)
 
 	banReq := banRequest{
 		duration:  bot.PermanentBanDuration,
@@ -633,7 +633,7 @@ func (a *admin) deleteUserMessages(c *ChatContext, userID int64) (deleted int, e
 	}
 
 	if failed > 0 {
-		log.Printf("[INFO] aggressive cleanup completed: deleted %d messages, failed %d", deleted, failed)
+		log.Printf("[INFO] %saggressive cleanup completed: deleted %d messages, failed %d", gidTag(c), deleted, failed)
 	}
 	return deleted, nil
 }
@@ -743,7 +743,7 @@ func (a *admin) directReport(c *ChatContext, update tbapi.Update, updateSamples 
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", origMsg.MessageID, err))
 	} else {
-		log.Printf("[INFO] spam message %d deleted", origMsg.MessageID)
+		log.Printf("[INFO] %sspam message %d deleted", gidTag(c), origMsg.MessageID)
 	}
 
 	// delete reply message
@@ -754,7 +754,7 @@ func (a *admin) directReport(c *ChatContext, update tbapi.Update, updateSamples 
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", update.Message.MessageID, err))
 	} else {
-		log.Printf("[INFO] admin spam reprot message %d deleted", update.Message.MessageID)
+		log.Printf("[INFO] %sadmin spam reprot message %d deleted", gidTag(c), update.Message.MessageID)
 	}
 
 	_, username := a.getForwardUsernameAndID(update)
@@ -765,7 +765,7 @@ func (a *admin) directReport(c *ChatContext, update tbapi.Update, updateSamples 
 	// skip ban and cleanup for anonymous admin posts - banning the shared system bot user
 	// (GroupAnonymousBot) would affect all anonymous admin messages in the group
 	if origMsg.SenderChat != nil && origMsg.SenderChat.ID == c.PrimaryChatID {
-		log.Printf("[WARN] skipping ban for anonymous admin post, sender chat %d matches group chat", c.PrimaryChatID)
+		log.Printf("[WARN] %sskipping ban for anonymous admin post, sender chat %d matches group chat", gidTag(c), c.PrimaryChatID)
 	} else {
 		// ban user or channel
 		banReq := banRequest{duration: bot.PermanentBanDuration, userID: origMsg.From.ID, channelID: channelID,
@@ -787,7 +787,7 @@ func (a *admin) directReport(c *ChatContext, update tbapi.Update, updateSamples 
 		go func() {
 			deleted, err := a.deleteUserMessages(c, cleanupUserID)
 			if err != nil {
-				log.Printf("[WARN] aggressive cleanup failed: %v", err)
+				log.Printf("[WARN] %saggressive cleanup failed: %v", gidTag(c), err)
 				return
 			}
 			if deleted > 0 {
@@ -795,11 +795,11 @@ func (a *admin) directReport(c *ChatContext, update tbapi.Update, updateSamples 
 				if origMsg.SenderChat != nil && origMsg.SenderChat.UserName != "" {
 					cleanupName = origMsg.SenderChat.UserName
 				}
-				log.Printf("[INFO] aggressive cleanup: deleted %d messages from %d", deleted, cleanupUserID)
+				log.Printf("[INFO] %saggressive cleanup: deleted %d messages from %d", gidTag(c), deleted, cleanupUserID)
 				notifyMsg := fmt.Sprintf("_deleted %d messages from spammer %q (%d)_",
 					deleted, escapeMarkDownV1Text(cleanupName), cleanupUserID)
 				if err := send(tbapi.NewMessage(a.adminChatID, notifyMsg), a.tbAPI); err != nil {
-					log.Printf("[WARN] failed to send deletion notification: %v", err)
+					log.Printf("[WARN] %sfailed to send deletion notification: %v", gidTag(c), err)
 				}
 			}
 		}()
@@ -855,7 +855,7 @@ func (a *admin) InlineCallbackHandler(query *tbapi.CallbackQuery) error {
 	if err := a.callbackUnbanConfirmed(c, query); err != nil {
 		return fmt.Errorf("failed to unban user: %w", err)
 	}
-	log.Printf("[INFO] user unbanned, chatID: %d, userID: %s, orig: %q", chatID, callbackData, query.Message.Text)
+	log.Printf("[INFO] %suser unbanned, chatID: %d, userID: %s, orig: %q", gidTag(c), chatID, callbackData, query.Message.Text)
 
 	return nil
 }
@@ -1177,9 +1177,9 @@ func (a *admin) deleteAndBan(c *ChatContext, query *tbapi.CallbackQuery, userID 
 	}
 
 	if msgFromSuper {
-		log.Printf("[INFO] message %d deleted, user %q (%d) is super, not banned", msgID, userName, userID)
+		log.Printf("[INFO] %smessage %d deleted, user %q (%d) is super, not banned", gidTag(c), msgID, userName, userID)
 	} else {
-		log.Printf("[INFO] message %d deleted, user %q (%d) banned", msgID, userName, userID)
+		log.Printf("[INFO] %smessage %d deleted, user %q (%d) banned", gidTag(c), msgID, userName, userID)
 	}
 	return nil
 }

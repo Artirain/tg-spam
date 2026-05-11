@@ -171,8 +171,8 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 
 	// validate reporter is approved user
 	if !c.Bot.IsApprovedUser(update.Message.From.ID) {
-		log.Printf("[INFO] report rejected: reporter %d (%s) not in approved list",
-			update.Message.From.ID, update.Message.From.UserName)
+		log.Printf("[INFO] %sreport rejected: reporter %d (%s) not in approved list",
+			gidTag(c), update.Message.From.ID, update.Message.From.UserName)
 		// still delete the /report command to keep chat clean
 		_, _ = r.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 			MessageID:  update.Message.MessageID,
@@ -187,7 +187,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 		return fmt.Errorf("failed to check rate limit: %w", err)
 	}
 	if rateLimited {
-		log.Printf("[INFO] reporter %d (%s) exceeded rate limit", update.Message.From.ID, update.Message.From.UserName)
+		log.Printf("[INFO] %sreporter %d (%s) exceeded rate limit", gidTag(c), update.Message.From.ID, update.Message.From.UserName)
 		// still delete the /report command to keep chat clean
 		_, _ = r.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 			MessageID:  update.Message.MessageID,
@@ -202,9 +202,9 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 		ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 	}})
 	if err != nil {
-		log.Printf("[WARN] failed to delete report message %d: %v", update.Message.MessageID, err)
+		log.Printf("[WARN] %sfailed to delete report message %d: %v", gidTag(c), update.Message.MessageID, err)
 	} else {
-		log.Printf("[INFO] report message %d deleted", update.Message.MessageID)
+		log.Printf("[INFO] %sreport message %d deleted", gidTag(c), update.Message.MessageID)
 	}
 
 	// extract message text
@@ -240,7 +240,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 
 	// check if threshold reached
 	if err := r.checkReportThreshold(ctx, c, origMsg.MessageID, c.PrimaryChatID); err != nil {
-		log.Printf("[WARN] failed to check report threshold: %v", err)
+		log.Printf("[WARN] %sfailed to check report threshold: %v", gidTag(c), err)
 	}
 
 	return nil
@@ -289,8 +289,8 @@ func (r *userReports) checkReportThreshold(ctx context.Context, c *ChatContext, 
 
 	// check if auto-ban threshold reached
 	if r.AutoBanThreshold > 0 && reportCount >= r.AutoBanThreshold {
-		log.Printf("[INFO] auto-ban threshold reached for msgID:%d, chatID:%d: %d reports (threshold: %d)",
-			msgID, chatID, reportCount, r.AutoBanThreshold)
+		log.Printf("[INFO] %sauto-ban threshold reached for msgID:%d, chatID:%d: %d reports (threshold: %d)",
+			gidTag(c), msgID, chatID, reportCount, r.AutoBanThreshold)
 		return r.executeAutoBan(ctx, c, reports)
 	}
 
@@ -301,8 +301,8 @@ func (r *userReports) checkReportThreshold(ctx context.Context, c *ChatContext, 
 		return nil
 	}
 
-	log.Printf("[INFO] report threshold reached for msgID:%d, chatID:%d: %d reports",
-		msgID, chatID, reportCount)
+	log.Printf("[INFO] %sreport threshold reached for msgID:%d, chatID:%d: %d reports",
+		gidTag(c), msgID, chatID, reportCount)
 
 	// check if admin notification already sent
 	if len(reports) > 0 && reports[0].NotificationSent {
@@ -332,8 +332,8 @@ func (r *userReports) executeAutoBan(ctx context.Context, c *ChatContext, report
 	reportedUserName := firstReport.ReportedUserName
 	msgText := firstReport.MsgText
 
-	log.Printf("[INFO] executing auto-ban for user %d (%s) based on %d reports",
-		reportedUserID, reportedUserName, len(reports))
+	log.Printf("[INFO] %sexecuting auto-ban for user %d (%s) based on %d reports",
+		gidTag(c), reportedUserID, reportedUserName, len(reports))
 
 	// remove user from approved list
 	if remErr := c.Bot.RemoveApprovedUser(reportedUserID); remErr != nil {
@@ -354,9 +354,9 @@ func (r *userReports) executeAutoBan(ctx context.Context, c *ChatContext, report
 			ChatConfig: tbapi.ChatConfig{ChatID: chatID},
 		}})
 		if err != nil {
-			log.Printf("[WARN] failed to delete reported message %d: %v", msgID, err)
+			log.Printf("[WARN] %sfailed to delete reported message %d: %v", gidTag(c), msgID, err)
 		} else {
-			log.Printf("[INFO] reported message %d auto-deleted", msgID)
+			log.Printf("[INFO] %sreported message %d auto-deleted", gidTag(c), msgID)
 		}
 	}
 
@@ -400,7 +400,7 @@ func (r *userReports) executeAutoBan(ctx context.Context, c *ChatContext, report
 		log.Printf("[WARN] failed to delete reports for msgID:%d: %v", msgID, err)
 	}
 
-	log.Printf("[INFO] auto-ban executed for user %d by %d reports", reportedUserID, len(reports))
+	log.Printf("[INFO] %sauto-ban executed for user %d by %d reports", gidTag(c), reportedUserID, len(reports))
 	return nil
 }
 
@@ -591,8 +591,8 @@ func (r *userReports) sendReportNotification(ctx context.Context, c *ChatContext
 		// don't fail - notification was sent successfully
 	}
 
-	log.Printf("[INFO] user report notification sent to admin chat: msgID:%d, reported:%s (%d), %d reports",
-		msgID, reportedUserName, reportedUserID, len(reports))
+	log.Printf("[INFO] %suser report notification sent to admin chat: msgID:%d, reported:%s (%d), %d reports",
+		gidTag(c), msgID, reportedUserName, reportedUserID, len(reports))
 	return nil
 }
 
@@ -662,8 +662,8 @@ func (r *userReports) updateReportNotification(_ context.Context, c *ChatContext
 		return fmt.Errorf("failed to edit admin notification for msgID:%d, chatID:%d: %w", msgID, chatID, err)
 	}
 
-	log.Printf("[INFO] updated report notification for msgID:%d (reported user:%d, %d reports total, admin_msg_id:%d)",
-		msgID, reportedUserID, len(reports), adminMsgID)
+	log.Printf("[INFO] %supdated report notification for msgID:%d (reported user:%d, %d reports total, admin_msg_id:%d)",
+		gidTag(c), msgID, reportedUserID, len(reports), adminMsgID)
 	return nil
 }
 
@@ -716,9 +716,9 @@ func (r *userReports) callbackReportBan(ctx context.Context, c *ChatContext, que
 			ChatConfig: tbapi.ChatConfig{ChatID: chatID},
 		}})
 		if err != nil {
-			log.Printf("[WARN] failed to delete reported message %d: %v", msgID, err)
+			log.Printf("[WARN] %sfailed to delete reported message %d: %v", gidTag(c), msgID, err)
 		} else {
-			log.Printf("[INFO] reported message %d deleted", msgID)
+			log.Printf("[INFO] %sreported message %d deleted", gidTag(c), msgID)
 		}
 	}
 
@@ -751,7 +751,7 @@ func (r *userReports) callbackReportBan(ctx context.Context, c *ChatContext, que
 			query.Message.Chat.ID, query.Message.MessageID, err)
 	}
 
-	log.Printf("[INFO] report ban approved for user %d by admin %s", reportedUserID, query.From.UserName)
+	log.Printf("[INFO] %sreport ban approved for user %d by admin %s", gidTag(c), reportedUserID, query.From.UserName)
 	return nil
 }
 
@@ -797,7 +797,7 @@ func (r *userReports) callbackReportReject(ctx context.Context, c *ChatContext, 
 			query.Message.Chat.ID, query.Message.MessageID, err)
 	}
 
-	log.Printf("[INFO] report rejected by admin %s for msgID:%d", query.From.UserName, msgID)
+	log.Printf("[INFO] %sreport rejected by admin %s for msgID:%d", gidTag(c), query.From.UserName, msgID)
 	return nil
 }
 
@@ -859,7 +859,7 @@ func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, c *ChatC
 			query.Message.Chat.ID, query.Message.MessageID, err)
 	}
 
-	log.Printf("[INFO] ban reporter confirmation shown for msgID:%d", msgID)
+	log.Printf("[INFO] %sban reporter confirmation shown for msgID:%d", gidTag(c), msgID)
 	return nil
 }
 
@@ -992,7 +992,7 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, c *C
 		}
 	}
 
-	log.Printf("[INFO] reporter %s banned by admin %s for msgID:%d", reporterName, query.From.UserName, msgID)
+	log.Printf("[INFO] %sreporter %s banned by admin %s for msgID:%d", gidTag(c), reporterName, query.From.UserName, msgID)
 	return nil
 }
 
