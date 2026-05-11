@@ -25,40 +25,58 @@ const (
 	CmdAddGIDColumnSpam
 	CmdAddLocatorMessage
 	CmdAddLocatorSpam
+	CmdMessagesNeedsMigration
+	CmdMigrateMessagesCreate
+	CmdMigrateMessagesCopy
+	CmdMigrateMessagesDrop
+	CmdMigrateMessagesRename
+	CmdSpamNeedsMigration
+	CmdMigrateSpamCreate
+	CmdMigrateSpamCopy
+	CmdMigrateSpamDrop
+	CmdMigrateSpamRename
 )
 
 // locatorQueries holds all locator-related queries
 var locatorQueries = engine.NewQueryMap().
 	Add(CmdCreateLocatorTables, engine.Query{
 		Sqlite: `CREATE TABLE IF NOT EXISTS messages (
-            hash TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash TEXT NOT NULL,
             gid TEXT NOT NULL DEFAULT '',
             time TIMESTAMP,
             chat_id INTEGER,
             user_id INTEGER,
             user_name TEXT,
-            msg_id INTEGER
+            msg_id INTEGER,
+            UNIQUE(gid, hash)
         );
         CREATE TABLE IF NOT EXISTS spam (
-            user_id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             gid TEXT NOT NULL DEFAULT '',
             time TIMESTAMP,
-            checks TEXT
+            checks TEXT,
+            UNIQUE(gid, user_id)
         )`,
 		Postgres: `CREATE TABLE IF NOT EXISTS messages (
-            hash TEXT PRIMARY KEY,
+            id BIGSERIAL PRIMARY KEY,
+            hash TEXT NOT NULL,
             gid TEXT NOT NULL DEFAULT '',
             time TIMESTAMP,
             chat_id BIGINT,
             user_id BIGINT,
             user_name TEXT,
-            msg_id INTEGER
+            msg_id INTEGER,
+            UNIQUE(gid, hash)
         );
         CREATE TABLE IF NOT EXISTS spam (
-            user_id BIGINT PRIMARY KEY,
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
             gid TEXT NOT NULL DEFAULT '',
             time TIMESTAMP,
-            checks TEXT
+            checks TEXT,
+            UNIQUE(gid, user_id)
         )`,
 	}).
 	Add(CmdCreateLocatorIndexes, engine.Query{
@@ -85,27 +103,156 @@ var locatorQueries = engine.NewQueryMap().
 		Postgres: "ALTER TABLE spam ADD COLUMN IF NOT EXISTS gid TEXT DEFAULT ''",
 	}).
 	Add(CmdAddLocatorMessage, engine.Query{
-		Sqlite: `INSERT OR REPLACE INTO messages (hash, gid, time, chat_id, user_id, user_name, msg_id) 
-            VALUES (:hash, :gid, :time, :chat_id, :user_id, :user_name, :msg_id)`,
-		Postgres: `INSERT INTO messages (hash, gid, time, chat_id, user_id, user_name, msg_id) 
+		Sqlite: `INSERT INTO messages (hash, gid, time, chat_id, user_id, user_name, msg_id)
             VALUES (:hash, :gid, :time, :chat_id, :user_id, :user_name, :msg_id)
-            ON CONFLICT (hash) DO UPDATE SET 
-            gid = :gid, 
-            time = :time, 
-            chat_id = :chat_id, 
-            user_id = :user_id, 
-            user_name = :user_name, 
-            msg_id = :msg_id`,
+            ON CONFLICT(gid, hash) DO UPDATE SET
+            time = excluded.time,
+            chat_id = excluded.chat_id,
+            user_id = excluded.user_id,
+            user_name = excluded.user_name,
+            msg_id = excluded.msg_id`,
+		Postgres: `INSERT INTO messages (hash, gid, time, chat_id, user_id, user_name, msg_id)
+            VALUES (:hash, :gid, :time, :chat_id, :user_id, :user_name, :msg_id)
+            ON CONFLICT (gid, hash) DO UPDATE SET
+            time = EXCLUDED.time,
+            chat_id = EXCLUDED.chat_id,
+            user_id = EXCLUDED.user_id,
+            user_name = EXCLUDED.user_name,
+            msg_id = EXCLUDED.msg_id`,
 	}).
 	Add(CmdAddLocatorSpam, engine.Query{
-		Sqlite: `INSERT OR REPLACE INTO spam (user_id, gid, time, checks) 
-            VALUES (:user_id, :gid, :time, :checks)`,
-		Postgres: `INSERT INTO spam (user_id, gid, time, checks) 
+		Sqlite: `INSERT INTO spam (user_id, gid, time, checks)
             VALUES (:user_id, :gid, :time, :checks)
-            ON CONFLICT (user_id) DO UPDATE SET 
-            gid = :gid, 
-            time = :time, 
-            checks = :checks`,
+            ON CONFLICT(gid, user_id) DO UPDATE SET
+            time = excluded.time,
+            checks = excluded.checks`,
+		Postgres: `INSERT INTO spam (user_id, gid, time, checks)
+            VALUES (:user_id, :gid, :time, :checks)
+            ON CONFLICT (gid, user_id) DO UPDATE SET
+            time = EXCLUDED.time,
+            checks = EXCLUDED.checks`,
+	}).
+	Add(CmdMessagesNeedsMigration, engine.Query{
+		Sqlite: `SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'hash' AND pk = 1`,
+		Postgres: `SELECT COUNT(*) FROM (
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema    = kcu.table_schema
+            WHERE tc.table_schema    = current_schema()
+              AND tc.table_name      = 'messages'
+              AND tc.constraint_type = 'PRIMARY KEY'
+        ) pk_cols WHERE pk_cols.column_name = 'hash'
+          AND (SELECT COUNT(*) FROM (
+            SELECT kcu2.column_name
+            FROM information_schema.table_constraints tc2
+            JOIN information_schema.key_column_usage kcu2
+              ON tc2.constraint_name = kcu2.constraint_name
+             AND tc2.table_schema    = kcu2.table_schema
+            WHERE tc2.table_schema    = current_schema()
+              AND tc2.table_name      = 'messages'
+              AND tc2.constraint_type = 'PRIMARY KEY'
+          ) pkc2) = 1`,
+	}).
+	Add(CmdSpamNeedsMigration, engine.Query{
+		Sqlite: `SELECT COUNT(*) FROM pragma_table_info('spam') WHERE name = 'user_id' AND pk = 1`,
+		Postgres: `SELECT COUNT(*) FROM (
+            SELECT kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema    = kcu.table_schema
+            WHERE tc.table_schema    = current_schema()
+              AND tc.table_name      = 'spam'
+              AND tc.constraint_type = 'PRIMARY KEY'
+        ) pk_cols WHERE pk_cols.column_name = 'user_id'
+          AND (SELECT COUNT(*) FROM (
+            SELECT kcu2.column_name
+            FROM information_schema.table_constraints tc2
+            JOIN information_schema.key_column_usage kcu2
+              ON tc2.constraint_name = kcu2.constraint_name
+             AND tc2.table_schema    = kcu2.table_schema
+            WHERE tc2.table_schema    = current_schema()
+              AND tc2.table_name      = 'spam'
+              AND tc2.constraint_type = 'PRIMARY KEY'
+          ) pkc2) = 1`,
+	}).
+	Add(CmdMigrateMessagesCreate, engine.Query{
+		Sqlite: `CREATE TABLE messages_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash TEXT NOT NULL,
+            gid TEXT NOT NULL DEFAULT '',
+            time TIMESTAMP,
+            chat_id INTEGER,
+            user_id INTEGER,
+            user_name TEXT,
+            msg_id INTEGER,
+            UNIQUE(gid, hash)
+        )`,
+		Postgres: `CREATE TABLE messages_new (
+            id BIGSERIAL PRIMARY KEY,
+            hash TEXT NOT NULL,
+            gid TEXT NOT NULL DEFAULT '',
+            time TIMESTAMP,
+            chat_id BIGINT,
+            user_id BIGINT,
+            user_name TEXT,
+            msg_id INTEGER,
+            UNIQUE(gid, hash)
+        )`,
+	}).
+	Add(CmdMigrateSpamCreate, engine.Query{
+		Sqlite: `CREATE TABLE spam_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            gid TEXT NOT NULL DEFAULT '',
+            time TIMESTAMP,
+            checks TEXT,
+            UNIQUE(gid, user_id)
+        )`,
+		Postgres: `CREATE TABLE spam_new (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            gid TEXT NOT NULL DEFAULT '',
+            time TIMESTAMP,
+            checks TEXT,
+            UNIQUE(gid, user_id)
+        )`,
+	}).
+	Add(CmdMigrateMessagesCopy, engine.Query{
+		Sqlite: `INSERT OR IGNORE INTO messages_new (hash, gid, time, chat_id, user_id, user_name, msg_id)
+            SELECT hash, gid, time, chat_id, user_id, user_name, msg_id FROM messages
+            ORDER BY time DESC`,
+		Postgres: `INSERT INTO messages_new (hash, gid, time, chat_id, user_id, user_name, msg_id)
+            SELECT hash, gid, time, chat_id, user_id, user_name, msg_id FROM messages
+            ORDER BY time DESC
+            ON CONFLICT (gid, hash) DO NOTHING`,
+	}).
+	Add(CmdMigrateSpamCopy, engine.Query{
+		Sqlite: `INSERT OR IGNORE INTO spam_new (user_id, gid, time, checks)
+            SELECT user_id, gid, time, checks FROM spam
+            ORDER BY time DESC`,
+		Postgres: `INSERT INTO spam_new (user_id, gid, time, checks)
+            SELECT user_id, gid, time, checks FROM spam
+            ORDER BY time DESC
+            ON CONFLICT (gid, user_id) DO NOTHING`,
+	}).
+	Add(CmdMigrateMessagesDrop, engine.Query{
+		Sqlite:   `DROP TABLE messages`,
+		Postgres: `DROP TABLE messages`,
+	}).
+	Add(CmdMigrateMessagesRename, engine.Query{
+		Sqlite:   `ALTER TABLE messages_new RENAME TO messages`,
+		Postgres: `ALTER TABLE messages_new RENAME TO messages`,
+	}).
+	Add(CmdMigrateSpamDrop, engine.Query{
+		Sqlite:   `DROP TABLE spam`,
+		Postgres: `DROP TABLE spam`,
+	}).
+	Add(CmdMigrateSpamRename, engine.Query{
+		Sqlite:   `ALTER TABLE spam_new RENAME TO spam`,
+		Postgres: `ALTER TABLE spam_new RENAME TO spam`,
 	})
 
 // Locator stores messages metadata and spam results for a given ttl period.
@@ -154,13 +301,8 @@ func NewLocator(ctx context.Context, ttl time.Duration, minSize int, db *engine.
 }
 
 func (l *Locator) migrate(ctx context.Context, tx *sqlx.Tx, gid string) error {
-	// try to select with new structure, if works - already migrated
-	var count int
-	err := tx.GetContext(ctx, &count, "SELECT COUNT(*) FROM messages WHERE gid = ''")
-	if err == nil {
-		log.Printf("[DEBUG] locator tables already migrated")
-		return nil
-	}
+	// each migration step below is independently idempotent — the function runs
+	// unconditionally and individual steps short-circuit when their work is done.
 
 	// add gid column to messages
 	addGIDMessagesQuery, err := locatorQueries.Pick(l.Type(), CmdAddGIDColumnMessages)
@@ -190,11 +332,75 @@ func (l *Locator) migrate(ctx context.Context, tx *sqlx.Tx, gid string) error {
 		return fmt.Errorf("failed to update gid for existing messages: %w", err)
 	}
 
-	if _, err = tx.ExecContext(ctx, "UPDATE spam SET gid = ? WHERE gid = ''", gid); err != nil {
+	spamUpdateQuery := l.Adopt("UPDATE spam SET gid = ? WHERE gid = ''")
+	if _, err = tx.ExecContext(ctx, spamUpdateQuery, gid); err != nil {
 		return fmt.Errorf("failed to update gid for existing spam: %w", err)
 	}
 
+	// migrate messages PK from hash-only to (gid, hash) composite UNIQUE
+	if err := migrateLocatorTable(ctx, tx, l, "messages",
+		CmdMessagesNeedsMigration, CmdMigrateMessagesCreate, CmdMigrateMessagesCopy,
+		CmdMigrateMessagesDrop, CmdMigrateMessagesRename); err != nil {
+		return fmt.Errorf("failed to migrate messages table: %w", err)
+	}
+
+	// migrate spam PK from user_id-only to (gid, user_id) composite UNIQUE
+	if err := migrateLocatorTable(ctx, tx, l, "spam",
+		CmdSpamNeedsMigration, CmdMigrateSpamCreate, CmdMigrateSpamCopy,
+		CmdMigrateSpamDrop, CmdMigrateSpamRename); err != nil {
+		return fmt.Errorf("failed to migrate spam table: %w", err)
+	}
+
 	log.Printf("[DEBUG] locator tables migrated")
+	return nil
+}
+
+// migrateLocatorTable performs a create-copy-drop-rename migration for one locator
+// table when its old single-column PK needs to become a composite UNIQUE(gid, key).
+// Idempotent: detection query short-circuits when migration was already applied.
+// Runs inside the caller's transaction.
+func migrateLocatorTable(
+	ctx context.Context, tx *sqlx.Tx, l *Locator, tableName string,
+	cmdNeeds, cmdCreate, cmdCopy, cmdDrop, cmdRename engine.DBCmd,
+) error {
+	needsQuery, err := locatorQueries.Pick(l.Type(), cmdNeeds)
+	if err != nil {
+		return fmt.Errorf("pick %s migration detection query: %w", tableName, err)
+	}
+	var needs int
+	if err := tx.GetContext(ctx, &needs, needsQuery); err != nil {
+		return fmt.Errorf("detect %s migration need: %w", tableName, err)
+	}
+	if needs == 0 {
+		return nil
+	}
+
+	var beforeCount int
+	if err := tx.GetContext(ctx, &beforeCount, "SELECT COUNT(*) FROM "+tableName); err != nil {
+		return fmt.Errorf("count %s before migration: %w", tableName, err)
+	}
+	log.Printf("[INFO] %s migration: starting create-copy-rename for %d rows", tableName, beforeCount)
+
+	for _, cmd := range []engine.DBCmd{cmdCreate, cmdCopy, cmdDrop, cmdRename} {
+		q, err := locatorQueries.Pick(l.Type(), cmd)
+		if err != nil {
+			return fmt.Errorf("pick %s migration query: %w", tableName, err)
+		}
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("exec %s migration step: %w", tableName, err)
+		}
+	}
+
+	var afterCount int
+	if err := tx.GetContext(ctx, &afterCount, "SELECT COUNT(*) FROM "+tableName); err != nil {
+		return fmt.Errorf("count %s after migration: %w", tableName, err)
+	}
+	if afterCount != beforeCount {
+		log.Printf("[WARN] %s migration dedup: %d rows before, %d rows after (%d collapsed)",
+			tableName, beforeCount, afterCount, beforeCount-afterCount)
+	} else {
+		log.Printf("[INFO] %s migration: %d rows migrated", tableName, beforeCount)
+	}
 	return nil
 }
 

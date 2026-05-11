@@ -4,7 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/umputun/tg-spam/app/storage/engine"
 	"github.com/umputun/tg-spam/lib/spamcheck"
@@ -595,4 +599,64 @@ func (s *StorageTestSuite) TestLocator_GIDIsolation() {
 	spam2, found := locator2.Spam(ctx, 1)
 	s.Require().True(found)
 	s.False(spam2.Checks[0].Spam)
+}
+
+func TestLocator_CrossChat_SameHashCoexists(t *testing.T) {
+	ctx := context.Background()
+	rootDB, err := engine.New(ctx, ":memory:", "instance-a")
+	require.NoError(t, err)
+	defer rootDB.Close()
+
+	locA, err := NewLocator(ctx, time.Hour, 0, rootDB)
+	require.NoError(t, err)
+	require.NoError(t, locA.AddMessage(ctx, "hello", 100, 1, "user1", 10))
+
+	// scope the same root DB to a different gid; same underlying table
+	dbB := rootDB.WithGID("instance-b")
+	locB, err := NewLocator(ctx, time.Hour, 0, dbB)
+	require.NoError(t, err)
+	require.NoError(t, locB.AddMessage(ctx, "hello", 200, 2, "user2", 20))
+
+	metaA, ok := locA.Message(ctx, "hello")
+	require.True(t, ok, "instance-a row must remain visible")
+	assert.Equal(t, int64(100), metaA.ChatID)
+	assert.Equal(t, int64(1), metaA.UserID)
+
+	metaB, ok := locB.Message(ctx, "hello")
+	require.True(t, ok, "instance-b row must remain visible (new schema allows coexistence)")
+	assert.Equal(t, int64(200), metaB.ChatID)
+	assert.Equal(t, int64(2), metaB.UserID)
+}
+
+func TestLocator_CrossChat_SameUserCoexists(t *testing.T) {
+	ctx := context.Background()
+	rootDB, err := engine.New(ctx, ":memory:", "instance-a")
+	require.NoError(t, err)
+	defer rootDB.Close()
+
+	locA, err := NewLocator(ctx, time.Hour, 0, rootDB)
+	require.NoError(t, err)
+	require.NoError(t, locA.AddSpam(ctx, 555, []spamcheck.Response{{Name: "test-a", Spam: true}}))
+
+	dbB := rootDB.WithGID("instance-b")
+	locB, err := NewLocator(ctx, time.Hour, 0, dbB)
+	require.NoError(t, err)
+	require.NoError(t, locB.AddSpam(ctx, 555, []spamcheck.Response{{Name: "test-b", Spam: true}}))
+
+	// both rows must coexist for the same user_id across gids
+	var aCount, bCount int
+	require.NoError(t, rootDB.GetContext(ctx, &aCount,
+		"SELECT COUNT(*) FROM spam WHERE gid = ? AND user_id = ?", "instance-a", 555))
+	assert.Equal(t, 1, aCount)
+	require.NoError(t, rootDB.GetContext(ctx, &bCount,
+		"SELECT COUNT(*) FROM spam WHERE gid = ? AND user_id = ?", "instance-b", 555))
+	assert.Equal(t, 1, bCount)
+
+	// also verify checks differ via public Spam() — proves gid-scoped lookup
+	spamA, ok := locA.Spam(ctx, 555)
+	require.True(t, ok)
+	assert.Equal(t, "test-a", spamA.Checks[0].Name)
+	spamB, ok := locB.Spam(ctx, 555)
+	require.True(t, ok)
+	assert.Equal(t, "test-b", spamB.Checks[0].Name)
 }
