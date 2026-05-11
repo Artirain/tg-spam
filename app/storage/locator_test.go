@@ -824,3 +824,50 @@ func (s *StorageTestSuite) TestLocator_Migration_FromLegacySchema_Postgres() {
 	s.Require().NoError(db.GetContext(ctx, &spamGID, db.Adopt("SELECT gid FROM spam WHERE user_id = ?"), 555))
 	s.Equal(db.GID(), spamGID)
 }
+
+func TestLocator_Migration_IndexesRecreated(t *testing.T) {
+	ctx := context.Background()
+	db, err := engine.New(ctx, ":memory:", "test-instance")
+	require.NoError(t, err)
+	defer db.Close()
+
+	// seed legacy schema (no indexes — they'll be created via NewLocator → InitTable → CreateIndexes)
+	_, err = db.ExecContext(ctx, `CREATE TABLE messages (
+        hash TEXT PRIMARY KEY,
+        gid TEXT NOT NULL DEFAULT '',
+        time TIMESTAMP,
+        chat_id INTEGER,
+        user_id INTEGER,
+        user_name TEXT,
+        msg_id INTEGER
+    )`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE spam (
+        user_id INTEGER PRIMARY KEY,
+        gid TEXT NOT NULL DEFAULT '',
+        time TIMESTAMP,
+        checks TEXT
+    )`)
+	require.NoError(t, err)
+
+	// trigger NewLocator → InitTable → migrate (drop+rename) → CreateIndexes
+	_, err = NewLocator(ctx, time.Hour, 0, db)
+	require.NoError(t, err)
+
+	// each name below MUST match exactly what CmdCreateLocatorIndexes for SQLite emits in locator.go
+	expectedIndexes := []string{
+		"idx_messages_user_id",
+		"idx_messages_user_name",
+		"idx_spam_time",
+		"idx_messages_gid",
+		"idx_messages_gid_user_id_time",
+		"idx_spam_gid",
+	}
+	for _, idx := range expectedIndexes {
+		var name string
+		err := db.GetContext(ctx, &name,
+			"SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", idx)
+		require.NoError(t, err, "index %s missing after migration", idx)
+		assert.Equal(t, idx, name)
+	}
+}
