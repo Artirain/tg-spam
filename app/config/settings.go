@@ -110,7 +110,7 @@ func (c ConfiguredChat) Validate() error {
 //     Telegram.Group to Groups[0].Group so legacy reads stay consistent.
 //   - Both set -> Groups wins (canonical); Telegram.Group overwritten to match
 //     Groups[0].Group. No error even when they differed at input.
-//   - len(Groups) > 1 -> ERROR (Phase 2 cap; lifted in Phase 4 with listener routing).
+//   - len(Groups) > 1 -> multi-chat; all entries validated, gids must be unique.
 //   - Any ConfiguredChat with invalid gid (including one inherited from
 //     InstanceID) -> ERROR. Validation runs after fill so an InstanceID that
 //     fails gidPattern is rejected too.
@@ -123,9 +123,8 @@ func (s *Settings) NormalizeGroups() error {
 	if len(s.Telegram.Groups) == 0 {
 		s.Telegram.Groups = []ConfiguredChat{{Group: s.Telegram.Group, GID: s.InstanceID}}
 	}
-	if len(s.Telegram.Groups) > 1 {
-		return errors.New("multi-chat routing is not yet supported in this build; configure a single group")
-	}
+	seenGID := make(map[string]bool, len(s.Telegram.Groups))
+	seenGroup := make(map[string]bool, len(s.Telegram.Groups))
 	for i := range s.Telegram.Groups {
 		if s.Telegram.Groups[i].GID == "" {
 			s.Telegram.Groups[i].GID = s.InstanceID
@@ -133,6 +132,14 @@ func (s *Settings) NormalizeGroups() error {
 		if err := s.Telegram.Groups[i].Validate(); err != nil {
 			return fmt.Errorf("telegram.groups[%d]: %w", i, err)
 		}
+		if seenGID[s.Telegram.Groups[i].GID] {
+			return fmt.Errorf("telegram.groups: duplicate gid %q", s.Telegram.Groups[i].GID)
+		}
+		seenGID[s.Telegram.Groups[i].GID] = true
+		if seenGroup[s.Telegram.Groups[i].Group] {
+			return fmt.Errorf("telegram.groups: duplicate group %q", s.Telegram.Groups[i].Group)
+		}
+		seenGroup[s.Telegram.Groups[i].Group] = true
 	}
 	s.Telegram.Group = s.Telegram.Groups[0].Group
 	return nil

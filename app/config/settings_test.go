@@ -680,15 +680,36 @@ func TestSettings_NormalizeGroups(t *testing.T) {
 		assert.Empty(t, s.Telegram.Group)
 	})
 
-	t.Run("Phase 2 caps at one chat", func(t *testing.T) {
+	t.Run("multi-chat permitted", func(t *testing.T) {
 		s := &Settings{InstanceID: "instX"}
 		s.Telegram.Groups = []ConfiguredChat{
 			{Group: "g1", GID: "a"},
 			{Group: "g2", GID: "b"},
 		}
+		require.NoError(t, s.NormalizeGroups())
+		assert.Len(t, s.Telegram.Groups, 2)
+	})
+
+	t.Run("duplicate gid rejected", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Groups = []ConfiguredChat{
+			{Group: "g1", GID: "same"},
+			{Group: "g2", GID: "same"},
+		}
 		err := s.NormalizeGroups()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "single group")
+		assert.Contains(t, err.Error(), "duplicate gid")
+	})
+
+	t.Run("duplicate group rejected", func(t *testing.T) {
+		s := &Settings{InstanceID: "instX"}
+		s.Telegram.Groups = []ConfiguredChat{
+			{Group: "g1", GID: "a"},
+			{Group: "g1", GID: "b"},
+		}
+		err := s.NormalizeGroups()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate group")
 	})
 
 	t.Run("explicit Groups with empty gid gets InstanceID", func(t *testing.T) {
