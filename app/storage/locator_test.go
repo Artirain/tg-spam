@@ -748,3 +748,79 @@ func TestLocator_Migration_FromLegacySchema(t *testing.T) {
 	require.NoError(t, db.GetContext(ctx, &spamGID, "SELECT gid FROM spam WHERE user_id = ?", 555))
 	assert.Equal(t, "test-instance", spamGID)
 }
+
+// TestLocator_Migration_FromLegacySchema_Postgres mirrors TestLocator_Migration_FromLegacySchema
+// against Postgres, exercising the pre-Phase-2 → Phase-3 migration path on the real engine.
+// Runs through the suite so the existing pgContainer is reused (skipped in -short mode).
+func (s *StorageTestSuite) TestLocator_Migration_FromLegacySchema_Postgres() {
+	db, ok := s.dbs["postgres"]
+	if !ok {
+		s.T().Skip("postgres container unavailable (short mode)")
+	}
+
+	ctx := context.Background()
+
+	// drop any previous state, then set up a legacy Postgres schema (hash PK; no gid column)
+	_, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS messages`)
+	s.Require().NoError(err)
+	_, err = db.ExecContext(ctx, `DROP TABLE IF EXISTS spam`)
+	s.Require().NoError(err)
+	defer db.ExecContext(ctx, `DROP TABLE IF EXISTS messages`)
+	defer db.ExecContext(ctx, `DROP TABLE IF EXISTS spam`)
+
+	_, err = db.ExecContext(ctx, `CREATE TABLE messages (
+        hash TEXT PRIMARY KEY,
+        "time" TIMESTAMP,
+        chat_id BIGINT,
+        user_id BIGINT,
+        user_name TEXT,
+        msg_id INTEGER
+    )`)
+	s.Require().NoError(err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE spam (
+        user_id BIGINT PRIMARY KEY,
+        "time" TIMESTAMP,
+        checks TEXT
+    )`)
+	s.Require().NoError(err)
+
+	// seed legacy data; use a real sha256 hash so loc.Message lookup works post-migration
+	legacyMsg := "legacy message"
+	legacyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(legacyMsg)))
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO messages (hash, "time", chat_id, user_id, user_name, msg_id) VALUES ($1, NOW(), 100, 1, 'u', 10)`,
+		legacyHash)
+	s.Require().NoError(err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO spam (user_id, "time", checks) VALUES ($1, NOW(), '[]')`, 555)
+	s.Require().NoError(err)
+
+	// NewLocator triggers full migrate(): ALTER ADD COLUMN gid + backfill + PK migration
+	loc, err := NewLocator(ctx, time.Hour, 0, db)
+	s.Require().NoError(err)
+
+	// legacy row must survive the migration
+	meta, found := loc.Message(ctx, legacyMsg)
+	s.Require().True(found, "legacy row must survive migration")
+	s.Equal(int64(100), meta.ChatID)
+	s.Equal(int64(1), meta.UserID)
+	s.Equal("u", meta.UserName)
+	s.Equal(10, meta.MsgID)
+
+	// verify gid was backfilled to the engine's gid
+	var gid string
+	s.Require().NoError(db.GetContext(ctx, &gid, db.Adopt("SELECT gid FROM messages WHERE hash = ?"), legacyHash))
+	s.Equal(db.GID(), gid)
+
+	// verify new schema is in place: messages.id column should exist now
+	var hasIDColumn int
+	s.Require().NoError(db.GetContext(ctx, &hasIDColumn,
+		`SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'messages' AND column_name = 'id'`))
+	s.Equal(1, hasIDColumn, "messages must have surrogate id column after migration")
+
+	// verify the spam row survived too
+	var spamGID string
+	s.Require().NoError(db.GetContext(ctx, &spamGID, db.Adopt("SELECT gid FROM spam WHERE user_id = ?"), 555))
+	s.Equal(db.GID(), spamGID)
+}
