@@ -73,9 +73,9 @@ type TelegramListener struct {
 	Chats               []*ChatContext
 	SuperUsersCrossChat bool
 
-	// derived at Do() startup from Chats, used for routing (wired in Task 2)
-	byPrimary map[int64]*ChatContext  //nolint:unused // populated in Task 2
-	byGID     map[string]*ChatContext //nolint:unused // populated in Task 2
+	// derived at Do() startup from Chats, used for routing
+	byPrimary map[int64]*ChatContext
+	byGID     map[string]*ChatContext
 
 	adminHandler    *admin
 	reportsHandler  *userReports
@@ -107,20 +107,44 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 		log.Printf("[INFO] soft ban mode, no bans but restrictions")
 	}
 
-	// get chat ID for the group we are monitoring
-	var getChatErr error
-	if l.chatID, getChatErr = l.getChatID(l.Group); getChatErr != nil {
-		return fmt.Errorf("failed to get chat ID for group %q: %w", l.Group, getChatErr)
-	}
-	log.Printf("[INFO] primary chat ID: %d", l.chatID)
+	// build per-chat routing maps and resolve primary/linked IDs for each configured chat
+	l.byPrimary = make(map[int64]*ChatContext, len(l.Chats))
+	l.byGID = make(map[string]*ChatContext, len(l.Chats))
 
-	// resolve the linked channel for this discussion group
-	chatInfo, err := l.TbAPI.GetChat(tbapi.ChatInfoConfig{ChatConfig: tbapi.ChatConfig{ChatID: l.chatID}})
-	if err != nil {
-		log.Printf("[WARN] failed to get chat info for linked channel resolution: %v", err)
-	} else if chatInfo.LinkedChatID != 0 {
-		l.linkedChannelID = chatInfo.LinkedChatID
-		log.Printf("[INFO] linked channel ID: %d", l.linkedChannelID)
+	var getChatErr error
+	if len(l.Chats) == 0 {
+		// fallback for tests that construct TelegramListener without Chats
+		if l.chatID, getChatErr = l.getChatID(l.Group); getChatErr != nil {
+			return fmt.Errorf("failed to get chat ID for group %q: %w", l.Group, getChatErr)
+		}
+		log.Printf("[INFO] primary chat ID: %d", l.chatID)
+
+		chatInfo, err := l.TbAPI.GetChat(tbapi.ChatInfoConfig{ChatConfig: tbapi.ChatConfig{ChatID: l.chatID}})
+		if err != nil {
+			log.Printf("[WARN] failed to get chat info for linked channel resolution: %v", err)
+		} else if chatInfo.LinkedChatID != 0 {
+			l.linkedChannelID = chatInfo.LinkedChatID
+			log.Printf("[INFO] linked channel ID: %d", l.linkedChannelID)
+		}
+	} else {
+		for _, c := range l.Chats {
+			cid, err := l.getChatID(c.Group)
+			if err != nil {
+				return fmt.Errorf("failed to get chat ID for group %q (gid=%s): %w", c.Group, c.GID, err)
+			}
+			c.PrimaryChatID = cid
+			chatInfo, infoErr := l.TbAPI.GetChat(tbapi.ChatInfoConfig{ChatConfig: tbapi.ChatConfig{ChatID: cid}})
+			if infoErr != nil {
+				log.Printf("[WARN] failed to get chat info for linked channel resolution (gid=%s): %v", c.GID, infoErr)
+			} else if chatInfo.LinkedChatID != 0 {
+				c.LinkedChannelID = chatInfo.LinkedChatID
+			}
+			l.byPrimary[cid] = c
+			l.byGID[c.GID] = c
+			log.Printf("[INFO] chat resolved: gid=%s primary=%d linked=%d", c.GID, c.PrimaryChatID, c.LinkedChannelID)
+		}
+		l.chatID = l.Chats[0].PrimaryChatID
+		l.linkedChannelID = l.Chats[0].LinkedChannelID
 	}
 
 	if err := l.updateSupers(); err != nil {
