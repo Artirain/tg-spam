@@ -459,7 +459,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 		locatorUserID = msg.SenderChat.ID
 		locatorUserName = msg.SenderChat.UserName
 	}
-	if err := l.Locator.AddMessage(ctx, msg.Text, fromChat, locatorUserID, locatorUserName, msg.ID); err != nil {
+	if err := c.Locator.AddMessage(ctx, msg.Text, fromChat, locatorUserID, locatorUserName, msg.ID); err != nil {
 		log.Printf("[WARN] failed to add message to locator: %v", err)
 	}
 
@@ -471,7 +471,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 		return nil
 	}
 
-	resp := l.Bot.OnMessage(*msg, false)
+	resp := c.Bot.OnMessage(*msg, false)
 
 	if !resp.Send { // not spam
 		return nil
@@ -489,12 +489,12 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 	// ban user if requested by bot
 	if resp.Send && resp.BanInterval > 0 {
 		log.Printf("[DEBUG] ban initiated for %+v", resp)
-		l.SpamLogger.Save(msg, &resp)
+		c.SpamLogger.Save(msg, &resp)
 		spamUserID := msg.From.ID
 		if msg.SenderChat.ID != 0 {
 			spamUserID = msg.SenderChat.ID
 		}
-		if err := l.Locator.AddSpam(ctx, spamUserID, resp.CheckResults); err != nil {
+		if err := c.Locator.AddSpam(ctx, spamUserID, resp.CheckResults); err != nil {
 			log.Printf("[WARN] failed to add spam to locator: %v", err)
 		}
 		banUserStr := l.getBanUsername(resp, update)
@@ -642,7 +642,7 @@ func (l *TelegramListener) procNewChatMemberMessage(c *ChatContext, update tbapi
 
 	member := update.Message.NewChatMembers[0]
 	msg := fmt.Sprintf("new_%d_%d", fromChat, member.ID)
-	if err := l.Locator.AddMessage(context.TODO(), msg, fromChat, member.ID, "", update.Message.MessageID); err != nil {
+	if err := c.Locator.AddMessage(context.TODO(), msg, fromChat, member.ID, "", update.Message.MessageID); err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to add new chat member message to locator: %w", err))
 	}
 
@@ -672,7 +672,7 @@ func (l *TelegramListener) procLeftChatMemberMessage(c *ChatContext, update tbap
 		log.Printf("[DEBUG] left chat member is the same as the message sender, ignored")
 		return nil
 	}
-	msg, found := l.Locator.Message(context.TODO(), fmt.Sprintf("new_%d_%d", fromChat, update.Message.LeftChatMember.ID))
+	msg, found := c.Locator.Message(context.TODO(), fmt.Sprintf("new_%d_%d", fromChat, update.Message.LeftChatMember.ID))
 	if !found {
 		log.Printf("[DEBUG] no new chat member message found for %d in chat %d", update.Message.LeftChatMember.ID, fromChat)
 		return nil
@@ -738,6 +738,10 @@ func (l *TelegramListener) legacyChatContext() *ChatContext {
 		GID:             "default",
 		PrimaryChatID:   l.chatID,
 		LinkedChannelID: l.linkedChannelID,
+		Bot:             l.Bot,
+		Locator:         l.Locator,
+		SpamLogger:      l.SpamLogger,
+		Warnings:        l.Warnings,
 	}
 }
 
@@ -943,7 +947,7 @@ func (l *TelegramListener) procReaction(ctx context.Context, c *ChatContext, r *
 
 	var resp bot.Response
 	for range newReactionsAdded {
-		resp = l.Bot.OnReaction(r.User.ID, r.User.UserName)
+		resp = c.Bot.OnReaction(r.User.ID, r.User.UserName)
 		if resp.BanInterval > 0 {
 			break
 		}
@@ -952,10 +956,10 @@ func (l *TelegramListener) procReaction(ctx context.Context, c *ChatContext, r *
 		return nil
 	}
 
-	if err := l.Locator.AddSpam(ctx, r.User.ID, resp.CheckResults); err != nil {
+	if err := c.Locator.AddSpam(ctx, r.User.ID, resp.CheckResults); err != nil {
 		log.Printf("[WARN] failed to add reaction spam to locator: %v", err)
 	}
-	l.SpamLogger.Save(&bot.Message{From: resp.User, Text: "[reaction spam]"}, &resp)
+	c.SpamLogger.Save(&bot.Message{From: resp.User, Text: "[reaction spam]"}, &resp)
 
 	banUserStr := resp.User.String()
 	banReq := banRequest{
