@@ -187,7 +187,8 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 		adminChats = []*ChatContext{{
 			Group: l.Group, GID: "default",
 			PrimaryChatID: l.chatID, LinkedChannelID: l.linkedChannelID,
-			Bot: l.Bot, Locator: l.Locator, SpamLogger: l.SpamLogger, Warnings: l.Warnings,
+			Bot: l.Bot, Locator: l.Locator, SpamLogger: l.SpamLogger,
+			Reports: l.ReportConfig.Storage, Warnings: l.Warnings,
 		}}
 	}
 
@@ -743,6 +744,7 @@ func (l *TelegramListener) legacyChatContext() *ChatContext {
 		Bot:             l.Bot,
 		Locator:         l.Locator,
 		SpamLogger:      l.SpamLogger,
+		Reports:         l.ReportConfig.Storage,
 		Warnings:        l.Warnings,
 	}
 }

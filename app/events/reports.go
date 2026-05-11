@@ -60,6 +60,37 @@ func (r *userReports) defaultChat() *ChatContext {
 	return r.chats[0]
 }
 
+// resolveChat ensures the returned ChatContext has per-chat Bot/Locator/Reports
+// populated. when a field is missing on the passed-in or default ChatContext the
+// userReports-level handle is filled in as a fallback (used by tests that
+// construct userReports without wiring the handles onto the ChatContext).
+// the original ChatContext is never mutated; a shallow copy is returned when
+// overrides are applied. when both the input and defaultChat are nil, an empty
+// ChatContext (GID="") is synthesized so callback payloads keep the legacy
+// two-part format expected by single-chat deployments.
+func (r *userReports) resolveChat(c *ChatContext) *ChatContext {
+	if c == nil {
+		c = r.defaultChat()
+	}
+	if c == nil {
+		c = &ChatContext{}
+	}
+	if c.Bot != nil && c.Locator != nil && c.Reports != nil {
+		return c
+	}
+	out := *c
+	if out.Bot == nil {
+		out.Bot = r.bot
+	}
+	if out.Locator == nil {
+		out.Locator = r.locator
+	}
+	if out.Reports == nil {
+		out.Reports = r.Storage
+	}
+	return &out
+}
+
 // reportCallbackPayload builds a single callback payload for the report
 // keyboard. when c has a non-empty GID, the new three-part
 // <prefix>gid:userID:msgID format is produced; otherwise the legacy two-part
@@ -105,6 +136,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 	if c == nil {
 		return fmt.Errorf("chat context is required")
 	}
+	c = r.resolveChat(c)
 	origMsg := update.Message.ReplyToMessage
 	if origMsg == nil {
 		return fmt.Errorf("must reply to a message to report it")
@@ -138,7 +170,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 	}
 
 	// validate reporter is approved user
-	if !r.bot.IsApprovedUser(update.Message.From.ID) {
+	if !c.Bot.IsApprovedUser(update.Message.From.ID) {
 		log.Printf("[INFO] report rejected: reporter %d (%s) not in approved list",
 			update.Message.From.ID, update.Message.From.UserName)
 		// still delete the /report command to keep chat clean
@@ -150,7 +182,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 	}
 
 	// check rate limit for reporter
-	rateLimited, err := r.checkReportRateLimit(ctx, update.Message.From.ID)
+	rateLimited, err := r.checkReportRateLimit(ctx, c, update.Message.From.ID)
 	if err != nil {
 		return fmt.Errorf("failed to check rate limit: %w", err)
 	}
@@ -186,7 +218,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 	}
 
 	// check if reports storage is initialized
-	if r.Storage == nil {
+	if c.Reports == nil {
 		return fmt.Errorf("reports storage not initialized")
 	}
 
@@ -202,7 +234,7 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 	}
 
 	// store report
-	if err := r.Storage.Add(ctx, report); err != nil {
+	if err := c.Reports.Add(ctx, report); err != nil {
 		return fmt.Errorf("failed to add report: %w", err)
 	}
 
@@ -216,17 +248,18 @@ func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, upda
 
 // checkReportRateLimit checks if a reporter has exceeded their rate limit
 // returns true if rate limit exceeded, false otherwise
-func (r *userReports) checkReportRateLimit(ctx context.Context, reporterID int64) (bool, error) {
+func (r *userReports) checkReportRateLimit(ctx context.Context, c *ChatContext, reporterID int64) (bool, error) {
 	if r.RateLimit <= 0 {
 		// rate limiting disabled, no need for storage
 		return false, nil
 	}
-	if r.Storage == nil {
+	c = r.resolveChat(c)
+	if c.Reports == nil {
 		return false, fmt.Errorf("reports storage not initialized")
 	}
 
 	since := time.Now().Add(-r.RatePeriod)
-	count, err := r.Storage.GetReporterCountSince(ctx, reporterID, since)
+	count, err := c.Reports.GetReporterCountSince(ctx, reporterID, since)
 	if err != nil {
 		return false, fmt.Errorf("failed to get reporter count: %w", err)
 	}
@@ -241,12 +274,13 @@ func (r *userReports) checkReportRateLimit(ctx context.Context, reporterID int64
 
 // checkReportThreshold checks if report threshold is reached and sends admin notification if needed
 func (r *userReports) checkReportThreshold(ctx context.Context, c *ChatContext, msgID int, chatID int64) error {
-	if r.Storage == nil {
+	c = r.resolveChat(c)
+	if c.Reports == nil {
 		return fmt.Errorf("reports storage not initialized")
 	}
 
 	// query all reports for this message
-	reports, err := r.Storage.GetByMessage(ctx, msgID, chatID)
+	reports, err := c.Reports.GetByMessage(ctx, msgID, chatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports: %w", err)
 	}
@@ -288,6 +322,7 @@ func (r *userReports) executeAutoBan(ctx context.Context, c *ChatContext, report
 	if len(reports) == 0 {
 		return fmt.Errorf("no reports provided")
 	}
+	c = r.resolveChat(c)
 
 	// extract info from first report
 	firstReport := reports[0]
@@ -301,13 +336,13 @@ func (r *userReports) executeAutoBan(ctx context.Context, c *ChatContext, report
 		reportedUserID, reportedUserName, len(reports))
 
 	// remove user from approved list
-	if remErr := r.bot.RemoveApprovedUser(reportedUserID); remErr != nil {
+	if remErr := c.Bot.RemoveApprovedUser(reportedUserID); remErr != nil {
 		log.Printf("[DEBUG] can't remove user %d from approved list: %v", reportedUserID, remErr)
 	}
 
 	// update spam samples with message text (if not empty)
 	if !r.dry && msgText != "" {
-		if spamErr := r.bot.UpdateSpam(msgText); spamErr != nil {
+		if spamErr := c.Bot.UpdateSpam(msgText); spamErr != nil {
 			log.Printf("[WARN] failed to update spam samples: %v", spamErr)
 		}
 	}
@@ -361,7 +396,7 @@ func (r *userReports) executeAutoBan(ctx context.Context, c *ChatContext, report
 	}
 
 	// delete all reports for this message ONLY if notification succeeded (or no admin chat configured)
-	if err := r.Storage.DeleteByMessage(ctx, msgID, chatID); err != nil {
+	if err := c.Reports.DeleteByMessage(ctx, msgID, chatID); err != nil {
 		log.Printf("[WARN] failed to delete reports for msgID:%d: %v", msgID, err)
 	}
 
@@ -491,6 +526,7 @@ func (r *userReports) sendReportNotification(ctx context.Context, c *ChatContext
 		log.Printf("[DEBUG] admin chat not configured, skipping notification")
 		return nil
 	}
+	c = r.resolveChat(c)
 
 	// extract info from first report (all reports have same message/reported user)
 	firstReport := reports[0]
@@ -550,7 +586,7 @@ func (r *userReports) sendReportNotification(ctx context.Context, c *ChatContext
 	}
 
 	// update all reports with admin message ID
-	if err := r.Storage.UpdateAdminMsgID(ctx, msgID, chatID, resp.MessageID); err != nil {
+	if err := c.Reports.UpdateAdminMsgID(ctx, msgID, chatID, resp.MessageID); err != nil {
 		log.Printf("[WARN] failed to update admin message ID for msgID:%d: %v", msgID, err)
 		// don't fail - notification was sent successfully
 	}
@@ -646,10 +682,10 @@ func (r *userReports) callbackReportBan(ctx context.Context, c *ChatContext, que
 	if err != nil {
 		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
 	}
-	c = resolved
+	c = r.resolveChat(resolved)
 
 	// get reports from database to find chatID and message text
-	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
+	reports, err := c.Reports.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -662,13 +698,13 @@ func (r *userReports) callbackReportBan(ctx context.Context, c *ChatContext, que
 	reportedUserName := reports[0].ReportedUserName
 
 	// remove user from approved list
-	if remErr := r.bot.RemoveApprovedUser(reportedUserID); remErr != nil {
+	if remErr := c.Bot.RemoveApprovedUser(reportedUserID); remErr != nil {
 		log.Printf("[DEBUG] can't remove user %d from approved list: %v", reportedUserID, remErr)
 	}
 
 	// update spam samples with message text (if not empty)
 	if !r.dry && msgText != "" {
-		if spamErr := r.bot.UpdateSpam(msgText); spamErr != nil {
+		if spamErr := c.Bot.UpdateSpam(msgText); spamErr != nil {
 			log.Printf("[WARN] failed to update spam samples: %v", spamErr)
 		}
 	}
@@ -702,7 +738,7 @@ func (r *userReports) callbackReportBan(ctx context.Context, c *ChatContext, que
 	}
 
 	// delete all reports for this message
-	if err := r.Storage.DeleteByMessage(ctx, msgID, chatID); err != nil {
+	if err := c.Reports.DeleteByMessage(ctx, msgID, chatID); err != nil {
 		log.Printf("[WARN] failed to delete reports for msgID:%d: %v", msgID, err)
 	}
 
@@ -734,10 +770,10 @@ func (r *userReports) callbackReportReject(ctx context.Context, c *ChatContext, 
 	if err != nil {
 		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
 	}
-	c = resolved
+	c = r.resolveChat(resolved)
 
 	// get chatID from reports
-	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
+	reports, err := c.Reports.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -748,7 +784,7 @@ func (r *userReports) callbackReportReject(ctx context.Context, c *ChatContext, 
 	chatID := reports[0].ChatID
 
 	// delete all reports for this message
-	if err := r.Storage.DeleteByMessage(ctx, msgID, chatID); err != nil {
+	if err := c.Reports.DeleteByMessage(ctx, msgID, chatID); err != nil {
 		log.Printf("[WARN] failed to delete reports for msgID:%d: %v", msgID, err)
 	}
 
@@ -780,10 +816,10 @@ func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, c *ChatC
 	if err != nil {
 		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
 	}
-	c = resolved
+	c = r.resolveChat(resolved)
 
 	// get all reports for this message
-	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
+	reports, err := c.Reports.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -842,10 +878,10 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, c *C
 	if err != nil {
 		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
 	}
-	c = resolved
+	c = r.resolveChat(resolved)
 
 	// get reports to find chatID and reporter details
-	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
+	reports, err := c.Reports.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		return fmt.Errorf("failed to get reports for msgID:%d: %w", msgID, err)
 	}
@@ -882,19 +918,19 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, c *C
 	}
 
 	// delete reporter from database
-	if delErr := r.Storage.DeleteReporter(ctx, reporterID, msgID, chatID); delErr != nil {
+	if delErr := c.Reports.DeleteReporter(ctx, reporterID, msgID, chatID); delErr != nil {
 		log.Printf("[WARN] failed to delete reporter %d from database: %v", reporterID, delErr)
 	}
 
 	// get remaining reports
-	remainingReports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
+	remainingReports, err := c.Reports.GetByMessage(ctx, msgID, c.PrimaryChatID)
 	if err != nil {
 		log.Printf("[WARN] failed to get remaining reports for msgID:%d: %v", msgID, err)
 	}
 
 	if len(remainingReports) == 0 {
 		// no reporters remain - delete all reports and update notification
-		if delErr := r.Storage.DeleteByMessage(ctx, msgID, chatID); delErr != nil {
+		if delErr := c.Reports.DeleteByMessage(ctx, msgID, chatID); delErr != nil {
 			log.Printf("[WARN] failed to delete reports for msgID:%d: %v", msgID, delErr)
 		}
 

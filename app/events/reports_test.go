@@ -33,7 +33,7 @@ func TestUserReports_checkReportRateLimit(t *testing.T) {
 			},
 		}
 
-		exceeded, err := rep.checkReportRateLimit(ctx, 123)
+		exceeded, err := rep.checkReportRateLimit(ctx, nil, 123)
 		require.NoError(t, err)
 		assert.True(t, exceeded, "rate limit should be exceeded")
 		require.Len(t, mockReports.GetReporterCountSinceCalls(), 1)
@@ -54,7 +54,7 @@ func TestUserReports_checkReportRateLimit(t *testing.T) {
 			},
 		}
 
-		exceeded, err := rep.checkReportRateLimit(ctx, 123)
+		exceeded, err := rep.checkReportRateLimit(ctx, nil, 123)
 		require.NoError(t, err)
 		assert.False(t, exceeded, "rate limit should not be exceeded")
 		require.Len(t, mockReports.GetReporterCountSinceCalls(), 1)
@@ -75,7 +75,7 @@ func TestUserReports_checkReportRateLimit(t *testing.T) {
 			},
 		}
 
-		exceeded, err := rep.checkReportRateLimit(ctx, 123)
+		exceeded, err := rep.checkReportRateLimit(ctx, nil, 123)
 		require.NoError(t, err)
 		assert.False(t, exceeded, "rate limit should be disabled")
 		require.Empty(t, mockReports.GetReporterCountSinceCalls(), "should not call GetReporterCountSince when disabled")
@@ -90,7 +90,7 @@ func TestUserReports_checkReportRateLimit(t *testing.T) {
 			},
 		}
 
-		exceeded, err := rep.checkReportRateLimit(ctx, 123)
+		exceeded, err := rep.checkReportRateLimit(ctx, nil, 123)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reports storage not initialized")
 		assert.False(t, exceeded)
@@ -111,7 +111,7 @@ func TestUserReports_checkReportRateLimit(t *testing.T) {
 			},
 		}
 
-		exceeded, err := rep.checkReportRateLimit(ctx, 123)
+		exceeded, err := rep.checkReportRateLimit(ctx, nil, 123)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to get reporter count")
 		assert.False(t, exceeded)
