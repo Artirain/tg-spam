@@ -1,4 +1,4 @@
-# Multi-Chat Phase 4 — Listener Routing Implementation Plan
+# Multi-Chat Phase 4 — Listener Routing Implementation Plan (v2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -144,9 +144,32 @@ Convert the private `runtimeChatContext` to populate `events.ChatContext` instan
 **Files:**
 - Modify: `app/main.go`
 
-- [ ] **Step 1: Refactor the per-chat construction loop**
+- [ ] **Step 1: Refactor `makeDetector` to accept a shared SamplesModel**
 
-In `execute()`, replace the existing `chatCtxs := make([]*runtimeChatContext, 0, ...)` block with a slice of `*events.ChatContext` and per-chat scoped store instantiation:
+In `app/main.go`, change `makeDetector` signature from `(settings *config.Settings) *tgspam.Detector` to `(settings *config.Settings, model *tgspam.SamplesModel) *tgspam.Detector`. Internally, replace `tgspam.NewDetector(...)` with `tgspam.NewDetectorWithModel(..., model)` from Phase 1. All other wiring (OpenAI, Gemini, Lua, CAS, MetaChecks) stays.
+
+Update the existing call site:
+
+```go
+sharedModel := tgspam.NewSamplesModel()
+detector := makeDetector(settings, sharedModel)
+```
+
+This is the only change to the root detector. ReloadSamples / MessageCounter / UserStorage on this detector keep working as before.
+
+- [ ] **Step 2: Refactor `makeSpamBot` signature to separate global vs scoped DB**
+
+The current `makeSpamBot(ctx, settings, dataDB, detector)` creates `Samples` and `Dictionary` stores from `dataDB`. If we pass scoped-per-chat DB here, samples and dictionary become per-chat — wrong (spec says they're global).
+
+Two options:
+- **Option A (preferred, minimal diff)**: keep `makeSpamBot(ctx, settings, dataDB, detector)` always taking the **root** dataDB. Per-chat scope only affects detector-internal state (approved users, dup counter) and the listener-side stores. SpamFilter itself reads samples and dictionary, which are global — passing the root DB keeps them shared.
+- **Option B**: split `makeSpamBot` into `makeSamplesStore(ctx, rootDB)` + `makeDictionaryStore(ctx, rootDB)` + a thinner `makeSpamFilter(detector, samples, dict, settings)`. Cleaner separation but bigger diff.
+
+Plan v2 commits to **Option A**: per-chat `makeSpamBot(ctx, settings, dataDB, chatDetector)` always with the root `dataDB`. The detector parameter is per-chat — that's what differentiates the SpamFilter instances behavior-wise.
+
+- [ ] **Step 3: Build the per-chat construction loop**
+
+In `execute()`, replace the existing `chatCtxs := make([]*runtimeChatContext, 0, ...)` block with:
 
 ```go
 chats := make([]*events.ChatContext, 0, len(settings.Telegram.Groups))
@@ -154,7 +177,7 @@ for i := range settings.Telegram.Groups {
     gcfg := settings.Telegram.Groups[i]
     scopedDB := dataDB.WithGID(gcfg.GID)
 
-    // per-chat scoped stores
+    // per-chat scoped stores (NOT samples/dictionary — those are global)
     chatLocator, err := storage.NewLocator(ctx, settings.History.Duration, settings.History.MinSize, scopedDB)
     if err != nil {
         return fmt.Errorf("can't make locator for chat %s: %w", gcfg.GID, err)
@@ -163,10 +186,13 @@ for i := range settings.Telegram.Groups {
     if err != nil {
         return fmt.Errorf("can't make approved users for chat %s: %w", gcfg.GID, err)
     }
-    chatDetectedSpam, err := storage.NewDetectedSpam(ctx, scopedDB)
+
+    // per-chat SpamLogger so detected_spam writes land in the chat's gid scope
+    chatSpamLogger, chatDetectedSpam, err := makeSpamLogger(ctx, gcfg.GID, loggerWr, scopedDB)
     if err != nil {
-        return fmt.Errorf("can't make detected spam for chat %s: %w", gcfg.GID, err)
+        return fmt.Errorf("can't make spam logger for chat %s: %w", gcfg.GID, err)
     }
+
     var chatReports *storage.Reports
     if settings.Report.Enabled {
         chatReports, err = storage.NewReports(ctx, scopedDB)
@@ -182,88 +208,61 @@ for i := range settings.Telegram.Groups {
         }
     }
 
-    // per-chat Detector with shared classifier (Phase 1 Option A)
-    chatDetector := makeDetector(settings)
-    // share the classifier from the root detector to keep samples updates in sync:
-    chatDetector.WithSamplesModel(detector.SamplesModel())
+    // per-chat Detector with shared SamplesModel — samples updates from any chat
+    // propagate to all detectors via the shared classifier (Phase 1 Option A)
+    chatDetector := makeDetector(settings, sharedModel)
     // wire per-chat approved-users storage
     if _, err := chatDetector.WithUserStorage(chatApprovedUsers); err != nil {
         return fmt.Errorf("can't load approved users for chat %s: %w", gcfg.GID, err)
     }
+    // wire per-chat MessageCounter — MaxShortMsgCount must count this chat's messages only
+    chatDetector.WithMessageCounter(chatLocator)
 
-    chatSpamBot, err := makeSpamBot(ctx, settings, scopedDB, chatDetector)
+    // makeSpamBot always gets ROOT dataDB so samples/dictionary stores stay global
+    chatSpamBot, err := makeSpamBot(ctx, settings, dataDB, chatDetector)
     if err != nil {
         return fmt.Errorf("can't make spam bot for chat %s: %w", gcfg.GID, err)
     }
 
     chats = append(chats, &events.ChatContext{
+        Group:         gcfg.Group,
         GID:           gcfg.GID,
         Bot:           chatSpamBot,
         Locator:       chatLocator,
         ApprovedUsers: chatApprovedUsers,
         DetectedSpam:  chatDetectedSpam,
+        SpamLogger:    chatSpamLogger,
         Reports:       chatReports,
         Warnings:      chatWarnings,
     })
 }
 ```
 
-Note: `PrimaryChatID` and `LinkedChannelID` are filled by the listener at `Do()` startup time when it resolves chat IDs against Telegram. Keep them zero at this point.
+Note:
+- `sharedModel` was created in Step 1
+- `PrimaryChatID` and `LinkedChannelID` are filled by the listener at `Do()` startup
+- `SpamLogger` field added to `ChatContext` for the per-chat logger
+- `makeSpamBot` keeps its current 4-arg signature; we just pass root `dataDB` always
 
-`SamplesModel()` accessor on `Detector` may not exist — if so, add it as a small read-only getter on `*Detector`. Alternatively, expose `model *SamplesModel` directly via a public getter:
-
-```go
-// in lib/tgspam/detector.go:
-func (d *Detector) SamplesModel() *SamplesModel { return d.model }
-```
-
-And `WithSamplesModel` may not exist either — use the existing `NewDetectorWithModel` constructor instead:
-
-```go
-chatDetector := tgspam.NewDetectorWithModel(detector.Config, detector.SamplesModel())
-// configure the same checkers
-```
-
-Actually simpler: refactor `makeDetector` so it accepts the shared model:
-
-```go
-func makeDetector(settings *config.Settings, model *tgspam.SamplesModel) *tgspam.Detector {
-    detector := tgspam.NewDetectorWithModel(settings.toDetectorConfig(), model)
-    // existing meta-check / OpenAI / Gemini / Lua / CAS wiring goes here
-    return detector
-}
-```
-
-And in `execute()`:
-
-```go
-sharedModel := tgspam.NewSamplesModel()
-// ... ReloadSamples populates the shared model
-detector := makeDetector(settings, sharedModel)
-// later, per chat:
-chatDetector := makeDetector(settings, sharedModel)
-```
-
-Pick the minimal-diff path. The implementation plan must NOT invent symbols that don't exist. Read `lib/tgspam/detector.go` carefully first to see what's already available.
-
-- [ ] **Step 2: Pass `Chats` into TelegramListener**
+- [ ] **Step 4: Pass `Chats` + `SuperUsersCrossChat` into TelegramListener**
 
 ```go
 tgListener := events.TelegramListener{
     // ... existing fields ...
-    Chats: chats,
+    Chats:               chats,
+    SuperUsersCrossChat: settings.Admin.SuperUsersCrossChat,
 }
 ```
 
-- [ ] **Step 3: Build**
+Currently `settings.Admin.SuperUsersCrossChat` exists (Phase 2) but isn't wired in. Add the field to `TelegramListener` and pass it here.
+
+- [ ] **Step 5: Build**
 
 ```bash
 go build ./...
 ```
 
-If `SamplesModel` isn't exposed yet, add the getter and rebuild.
-
-- [ ] **Step 4: Run full suite**
+- [ ] **Step 6: Run full suite**
 
 ```bash
 go test -race ./... -count=1 2>&1 | tail
@@ -271,10 +270,10 @@ go test -race ./... -count=1 2>&1 | tail
 
 Expected: green. Listener fields still single-chat (chatID/adminChatID/linkedChannelID get populated from Chats[0] in Task 3). Behavior unchanged for single-chat installs.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add app/main.go lib/tgspam/detector.go
+git add app/main.go lib/tgspam/detector.go app/events/chatctx.go
 git commit -m "Wire per-chat stores into events.ChatContext list"
 ```
 
@@ -377,14 +376,17 @@ func (l *TelegramListener) isChatAllowed(fromChat int64) (*ChatContext, bool) {
     if c, ok := l.byPrimary[fromChat]; ok {
         return c, true
     }
-    if slices.Contains(l.TestingIDs, fromChat) {
-        return nil, true // testing channels have no ctx; legacy single-chat use
+    // TestingIDs fallback: in single-chat mode, route to Chats[0] (legacy semantics).
+    // In multi-chat mode, TestingIDs without explicit gid mapping is ambiguous —
+    // skip routing to avoid acting on the wrong chat.
+    if slices.Contains(l.TestingIDs, fromChat) && len(l.Chats) == 1 {
+        return l.Chats[0], true
     }
     return nil, false
 }
 ```
 
-Update all callers — they need to handle the ctx return.
+Update all callers — they need to handle the ctx return. Critical: do NOT return `(nil, true)` because callers dereference ctx.
 
 - [ ] **Step 2: `isLinkedChannel` checks any ctx**
 
@@ -611,32 +613,50 @@ func parseCallbackData(data string) (gid string, userID int64, msgID int, err er
 }
 ```
 
-- [ ] **Step 2: Update all 6 inline-keyboard sites**
+- [ ] **Step 2: Update all inline-keyboard sites (exhaustive)**
 
-Per the survey:
-- `admin.go:798` (callbackBanConfirm)
-- `admin.go:1132-1134` (sendWithUnbanMarkup)
-- `reports.go:479-481` (notifyNewReport)
-- `reports.go:556-558` (updateNotification)
-- `reports.go:855-857` (validateReportRejection)
-- `reports.go:885-887` (validateBanReporter)
+Per Codex review, the actual builder sites are more than the original survey listed. **Full list of 14 sites to update**:
+
+Admin (3 sites):
+- `app/events/admin.go:798` (callbackBanConfirm)
+- `app/events/admin.go:1132` (sendWithUnbanMarkup, "?" prefix)
+- `app/events/admin.go:1134` (sendWithUnbanMarkup, "!" prefix)
+
+Reports (11 sites):
+- `app/events/reports.go:479,480,481` (notifyNewReport — R+, R-, R?)
+- `app/events/reports.go:556,557,558` (updateNotification — R+, R-, R?)
+- `app/events/reports.go:722,730` (additional report builders — verify by reading the file)
+- `app/events/reports.go:855,856,857` (validateReportRejection — R+, R-, R?)
+- `app/events/reports.go:885,886,887` (validateBanReporter — R+, R-, R?)
+
+`grep -n 'NewInlineKeyboard\|fmt.Sprintf.*"R[+\-?!]\|fmt.Sprintf.*"[?+!]%d:%d' app/events/admin.go app/events/reports.go` to enumerate exhaustively before editing.
 
 Each currently emits `fmt.Sprintf("%d:%d", userID, msgID)` or `fmt.Sprintf("R+%d:%d", ...)` etc. Update to `fmt.Sprintf("%s:%d:%d", c.GID, userID, msgID)` / `fmt.Sprintf("R+%s:%d:%d", c.GID, ...)`. Each site has the `c` ctx available because the handler method now takes it.
 
-- [ ] **Step 3: Update all consumers of `parseCallbackData`**
+- [ ] **Step 3: Update all consumers of `parseCallbackData` (exhaustive)**
 
-Callers now get 4 return values. Where gid is empty (legacy callback), default to `Groups[0]`:
+Callers now get 4 return values. The 8 known callsites:
+- `app/events/admin.go:834`
+- `app/events/admin.go:877`
+- `app/events/admin.go:1000`
+- `app/events/reports.go:581`
+- `app/events/reports.go:661`
+- `app/events/reports.go:699`
+- `app/events/reports.go:753`
+- `app/events/reports.go:877`
+
+`grep -n 'parseCallbackData' app/events/*.go` to enumerate. Update each:
 
 ```go
 gid, userID, msgID, err := parseCallbackData(data)
 if err != nil { ... }
 var c *ChatContext
 if gid == "" {
-    if len(a.Chats) > 0 {
-        c = a.Chats[0]  // legacy fallback
-        if len(a.Chats) > 1 {
-            log.Printf("[WARN] legacy callback without gid, defaulting to chat %s", c.GID)
-        }
+    // legacy 2-part callback. Safe ONLY in single-chat mode — ambiguous in multi.
+    if len(a.Chats) == 1 {
+        c = a.Chats[0]
+    } else {
+        return fmt.Errorf("legacy callback without gid received in multi-chat mode; cannot route safely")
     }
 } else {
     c = a.byGID[gid]
@@ -645,6 +665,8 @@ if gid == "" {
     }
 }
 ```
+
+Multi-chat reject (not silent fallback) per Codex review: silent fallback could ban in the wrong chat.
 
 - [ ] **Step 4: Update `parseCallbackData` tests**
 
