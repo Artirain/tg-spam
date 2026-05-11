@@ -660,3 +660,23 @@ func TestLocator_CrossChat_SameUserCoexists(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "test-b", spamB.Checks[0].Name)
 }
+
+func TestLocator_Migration_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	db, err := engine.New(ctx, ":memory:", "test-instance")
+	require.NoError(t, err)
+	defer db.Close()
+
+	loc, err := NewLocator(ctx, time.Hour, 0, db)
+	require.NoError(t, err)
+	require.NoError(t, loc.AddMessage(ctx, "x", 1, 1, "u", 1))
+
+	// re-running NewLocator must be a no-op (migration short-circuits when already applied)
+	loc2, err := NewLocator(ctx, time.Hour, 0, db)
+	require.NoError(t, err)
+
+	// data from the first locator must still be queryable through the second
+	meta, ok := loc2.Message(ctx, "x")
+	require.True(t, ok, "data must survive idempotent re-migration")
+	assert.Equal(t, int64(1), meta.ChatID)
+}
