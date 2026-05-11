@@ -1962,8 +1962,8 @@ func TestTelegramListener_isChatAllowed(t *testing.T) {
 				chatID:     tc.chatID,
 				TestingIDs: tc.testingIDs,
 			}
-			result := listener.isChatAllowed(tc.fromChat)
-			assert.Equal(t, tc.expect, result)
+			_, ok := listener.isChatAllowed(tc.fromChat)
+			assert.Equal(t, tc.expect, ok)
 		})
 	}
 }
@@ -2274,7 +2274,7 @@ func TestProcNewChatMemberMessage(t *testing.T) {
 				chatID:  123,
 			}
 
-			err := l.procNewChatMemberMessage(tt.update)
+			err := l.procNewChatMemberMessage(nil, tt.update)
 			if tt.expectedError {
 				require.Error(t, err)
 			} else {
@@ -2416,7 +2416,7 @@ func TestProcLeftChatMemberMessage(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			err := l.procLeftChatMemberMessage(tt.update)
+			err := l.procLeftChatMemberMessage(nil, tt.update)
 			if tt.expectedError {
 				require.Error(t, err)
 			} else {
@@ -2505,7 +2505,7 @@ func TestTelegramListener_ForwardedGiveaway(t *testing.T) {
 	}
 
 	// test if the message is processed
-	err := l.procEvents(update)
+	err := l.procEvents(nil, update)
 	require.NoError(t, err)
 
 	// verify bot.OnMessage was called with the message
@@ -3767,7 +3767,7 @@ func TestTelegramListener_IsLinkedChannel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			l := &TelegramListener{linkedChannelID: tt.linkedChannelID}
-			assert.Equal(t, tt.expected, l.isLinkedChannel(tt.msg))
+			assert.Equal(t, tt.expected, l.isLinkedChannel(nil, tt.msg))
 		})
 	}
 }
@@ -4276,7 +4276,7 @@ func TestTelegramListener_PrivateChatStoresUser(t *testing.T) {
 			},
 		}
 
-		err := l.procEvents(update)
+		err := l.procEvents(nil, update)
 		require.NoError(t, err)
 
 		users := l.GetDMUsers()
@@ -4300,7 +4300,7 @@ func TestTelegramListener_PrivateChatStoresUser(t *testing.T) {
 			},
 		}
 
-		err := l.procEvents(update)
+		err := l.procEvents(nil, update)
 		require.NoError(t, err)
 
 		// verify bot.OnMessage was NOT called (would have t.Fatal'd above)
@@ -4332,7 +4332,7 @@ func TestTelegramListener_PrivateChatStoresUser(t *testing.T) {
 			},
 		}
 
-		err := l2.procEvents(update)
+		err := l2.procEvents(nil, update)
 		require.NoError(t, err)
 
 		users := l2.GetDMUsers()
@@ -4358,7 +4358,7 @@ func TestTelegramListener_PrivateChatStoresUser(t *testing.T) {
 			},
 		}
 
-		err := l3.procEvents(update)
+		err := l3.procEvents(nil, update)
 		require.NoError(t, err)
 		assert.Empty(t, l3.GetDMUsers())
 	})
