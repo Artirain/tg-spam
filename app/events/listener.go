@@ -274,6 +274,7 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 				}
 				editCtx, editOK := l.isChatAllowed(update.EditedMessage.Chat.ID)
 				if !editOK {
+					log.Printf("[DEBUG] edited message from chat %d not in any configured chat, ignored", update.EditedMessage.Chat.ID)
 					continue
 				}
 				if err := l.procEvents(editCtx, editedUpdate); err != nil {
@@ -308,6 +309,7 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 				} else {
 					newCtx, newOK := l.isChatAllowed(update.Message.Chat.ID)
 					if !newOK {
+						log.Printf("[DEBUG] new chat member from chat %d not in any configured chat, ignored", update.Message.Chat.ID)
 						continue
 					}
 					err := l.procNewChatMemberMessage(newCtx, update)
@@ -322,7 +324,9 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 			if update.Message.LeftChatMember != nil {
 				if l.SuppressJoinMessage {
 					leftCtx, leftOK := l.isChatAllowed(update.Message.Chat.ID)
-					if leftOK {
+					if !leftOK {
+						log.Printf("[DEBUG] left chat member from chat %d not in any configured chat, ignored", update.Message.Chat.ID)
+					} else {
 						// delete the stored join message when user leaves
 						err := l.procLeftChatMemberMessage(leftCtx, update)
 						if err != nil {
@@ -707,7 +711,7 @@ func (l *TelegramListener) isChatAllowed(fromChat int64) (*ChatContext, bool) {
 	if c, ok := l.byPrimary[fromChat]; ok {
 		return c, true
 	}
-	if len(l.Chats) >= 1 && slices.Contains(l.TestingIDs, fromChat) {
+	if slices.Contains(l.TestingIDs, fromChat) && len(l.Chats) == 1 {
 		return l.Chats[0], true
 	}
 	// legacy fallback for listeners constructed in tests without Chats
