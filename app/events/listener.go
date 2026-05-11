@@ -182,10 +182,12 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 
 	adminChats := l.Chats
 	if len(adminChats) == 0 && l.chatID != 0 {
-		// legacy fallback for tests constructed without Chats
+		// legacy fallback for tests constructed without Chats; carry per-chat handles
+		// so admin/reports methods can read them off the ChatContext uniformly.
 		adminChats = []*ChatContext{{
 			Group: l.Group, GID: "default",
 			PrimaryChatID: l.chatID, LinkedChannelID: l.linkedChannelID,
+			Bot: l.Bot, Locator: l.Locator, SpamLogger: l.SpamLogger, Warnings: l.Warnings,
 		}}
 	}
 
