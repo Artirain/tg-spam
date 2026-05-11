@@ -60,6 +60,45 @@ func (r *userReports) defaultChat() *ChatContext {
 	return r.chats[0]
 }
 
+// reportCallbackPayload builds a single callback payload for the report
+// keyboard. when c has a non-empty GID, the new three-part
+// <prefix>gid:userID:msgID format is produced; otherwise the legacy two-part
+// <prefix>userID:msgID is emitted so existing single-chat deployments and tests
+// keep working unchanged.
+func reportCallbackPayload(c *ChatContext, prefix string, userID int64, msgID int) string {
+	if c != nil && c.GID != "" {
+		return fmt.Sprintf("%s%s:%d:%d", prefix, c.GID, userID, msgID)
+	}
+	return fmt.Sprintf("%s%d:%d", prefix, userID, msgID)
+}
+
+// reportCallbackData builds the three standard report callback payloads
+// (approve ban / reject / ban reporter) for the inline keyboard.
+func (r *userReports) reportCallbackData(c *ChatContext, reportedUserID int64, msgID int) (approve, reject, banReporter string) {
+	approve = reportCallbackPayload(c, "R+", reportedUserID, msgID)
+	reject = reportCallbackPayload(c, "R-", reportedUserID, msgID)
+	banReporter = reportCallbackPayload(c, "R?", reportedUserID, msgID)
+	return approve, reject, banReporter
+}
+
+// resolveCallbackChat resolves a ChatContext from a callback-encoded gid.
+// gid="" falls back to chats[0] in single-chat mode; multi-chat mode rejects
+// the callback with an error so legacy two-part payloads never silently route
+// to the wrong group.
+func (r *userReports) resolveCallbackChat(gid string) (*ChatContext, error) {
+	if gid == "" {
+		if len(r.chats) == 1 {
+			return r.chats[0], nil
+		}
+		return nil, fmt.Errorf("legacy callback without gid in multi-chat mode")
+	}
+	c, ok := r.byGID[gid]
+	if !ok {
+		return nil, fmt.Errorf("unknown gid in callback: %q", gid)
+	}
+	return c, nil
+}
+
 // DirectUserReport handles messages replied with "/report" by regular users
 func (r *userReports) DirectUserReport(ctx context.Context, c *ChatContext, update tbapi.Update) error {
 	if c == nil {
@@ -443,7 +482,7 @@ func (r *userReports) updateNotificationForAutoBan(_ *ChatContext, reports []sto
 }
 
 // sendReportNotification sends a new admin notification for user reports
-func (r *userReports) sendReportNotification(ctx context.Context, _ *ChatContext, reports []storage.Report) error {
+func (r *userReports) sendReportNotification(ctx context.Context, c *ChatContext, reports []storage.Report) error {
 	if len(reports) == 0 {
 		return fmt.Errorf("no reports provided")
 	}
@@ -487,12 +526,14 @@ func (r *userReports) sendReportNotification(ctx context.Context, _ *ChatContext
 	notificationText += "\n\n" + padding
 
 	// create inline keyboard with action buttons
-	// callback format: R+reportedUserID:msgID, R-reportedUserID:msgID, R?reportedUserID:msgID
+	// callback format: R+gid:reportedUserID:msgID (3-part); falls back to legacy
+	// R+reportedUserID:msgID (2-part) when no gid is available
+	approveData, rejectData, banReporterData := r.reportCallbackData(c, reportedUserID, msgID)
 	keyboard := tbapi.NewInlineKeyboardMarkup(
 		tbapi.NewInlineKeyboardRow(
-			tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", fmt.Sprintf("R+%d:%d", reportedUserID, msgID)),
-			tbapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("R-%d:%d", reportedUserID, msgID)),
-			tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", fmt.Sprintf("R?%d:%d", reportedUserID, msgID)),
+			tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", approveData),
+			tbapi.NewInlineKeyboardButtonData("❌ Reject", rejectData),
+			tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", banReporterData),
 		),
 	)
 
@@ -519,7 +560,7 @@ func (r *userReports) sendReportNotification(ctx context.Context, _ *ChatContext
 }
 
 // updateReportNotification updates existing admin notification when new reports come in after threshold reached
-func (r *userReports) updateReportNotification(_ context.Context, _ *ChatContext, reports []storage.Report) error {
+func (r *userReports) updateReportNotification(_ context.Context, c *ChatContext, reports []storage.Report) error {
 	// validate reports list
 	if len(reports) == 0 {
 		return fmt.Errorf("reports list is empty")
@@ -565,11 +606,12 @@ func (r *userReports) updateReportNotification(_ context.Context, _ *ChatContext
 	notification += "\n\n" + padding
 
 	// create inline keyboard with 3 buttons (same as sendReportNotification)
+	approveData, rejectData, banReporterData := r.reportCallbackData(c, reportedUserID, msgID)
 	keyboard := tbapi.NewInlineKeyboardMarkup(
 		tbapi.NewInlineKeyboardRow(
-			tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", fmt.Sprintf("R+%d:%d", reportedUserID, msgID)),
-			tbapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("R-%d:%d", reportedUserID, msgID)),
-			tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", fmt.Sprintf("R?%d:%d", reportedUserID, msgID)),
+			tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", approveData),
+			tbapi.NewInlineKeyboardButtonData("❌ Reject", rejectData),
+			tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", banReporterData),
 		),
 	)
 
@@ -595,10 +637,15 @@ func (r *userReports) callbackReportBan(ctx context.Context, c *ChatContext, que
 		return fmt.Errorf("chat context is required")
 	}
 	// parse callback data
-	reportedUserID, msgID, err := parseCallbackData(query.Data)
+	gid, reportedUserID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
 		return fmt.Errorf("failed to parse callback data: %w", err)
 	}
+	resolved, err := r.resolveCallbackChat(gid)
+	if err != nil {
+		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
+	}
+	c = resolved
 
 	// get reports from database to find chatID and message text
 	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
@@ -678,10 +725,15 @@ func (r *userReports) callbackReportReject(ctx context.Context, c *ChatContext, 
 		return fmt.Errorf("chat context is required")
 	}
 	// parse callback data
-	_, msgID, err := parseCallbackData(query.Data)
+	gid, _, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
 		return fmt.Errorf("failed to parse callback data: %w", err)
 	}
+	resolved, err := r.resolveCallbackChat(gid)
+	if err != nil {
+		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
+	}
+	c = resolved
 
 	// get chatID from reports
 	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
@@ -719,10 +771,15 @@ func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, c *ChatC
 		return fmt.Errorf("chat context is required")
 	}
 	// parse callback data
-	reportedUserID, msgID, err := parseCallbackData(query.Data)
+	gid, reportedUserID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
 		return fmt.Errorf("failed to parse callback data: %w", err)
 	}
+	resolved, err := r.resolveCallbackChat(gid)
+	if err != nil {
+		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
+	}
+	c = resolved
 
 	// get all reports for this message
 	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
@@ -742,7 +799,7 @@ func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, c *ChatC
 		}
 		button := tbapi.NewInlineKeyboardButtonData(
 			fmt.Sprintf("Ban %s", reporterName),
-			fmt.Sprintf("R!%d:%d", report.ReporterUserID, msgID),
+			reportCallbackPayload(c, "R!", report.ReporterUserID, msgID),
 		)
 		keyboard = append(keyboard, []tbapi.InlineKeyboardButton{button})
 	}
@@ -750,7 +807,7 @@ func (r *userReports) callbackReportBanReporterAsk(ctx context.Context, c *ChatC
 	// add cancel button in new row
 	cancelButton := tbapi.NewInlineKeyboardButtonData(
 		"Cancel",
-		fmt.Sprintf("RX%d:%d", reportedUserID, msgID),
+		reportCallbackPayload(c, "RX", reportedUserID, msgID),
 	)
 	keyboard = append(keyboard, []tbapi.InlineKeyboardButton{cancelButton})
 
@@ -776,10 +833,15 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, c *C
 		return fmt.Errorf("chat context is required")
 	}
 	// parse callback data
-	reporterID, msgID, err := parseCallbackData(query.Data)
+	gid, reporterID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
 		return fmt.Errorf("failed to parse callback data: %w", err)
 	}
+	resolved, err := r.resolveCallbackChat(gid)
+	if err != nil {
+		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
+	}
+	c = resolved
 
 	// get reports to find chatID and reporter details
 	reports, err := r.Storage.GetByMessage(ctx, msgID, c.PrimaryChatID)
@@ -876,11 +938,12 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, c *C
 		updText += "\n\n" + padding
 
 		// restore original buttons
+		approveData, rejectData, banReporterData := r.reportCallbackData(c, reportedUserID, msgID)
 		keyboard := tbapi.NewInlineKeyboardMarkup(
 			tbapi.NewInlineKeyboardRow(
-				tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", fmt.Sprintf("R+%d:%d", reportedUserID, msgID)),
-				tbapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("R-%d:%d", reportedUserID, msgID)),
-				tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", fmt.Sprintf("R?%d:%d", reportedUserID, msgID)),
+				tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", approveData),
+				tbapi.NewInlineKeyboardButtonData("❌ Reject", rejectData),
+				tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", banReporterData),
 			),
 		)
 
@@ -897,20 +960,25 @@ func (r *userReports) callbackReportBanReporterConfirm(ctx context.Context, c *C
 }
 
 // callbackReportCancel handles the callback when admin cancels ban reporter action
-// callback data: RXreportedUserID:msgID
+// callback data: RX[gid:]reportedUserID:msgID
 func (r *userReports) callbackReportCancel(_ context.Context, _ *ChatContext, query *tbapi.CallbackQuery) error {
 	// parse callback data
-	reportedUserID, msgID, err := parseCallbackData(query.Data)
+	gid, reportedUserID, msgID, err := parseCallbackData(query.Data)
 	if err != nil {
 		return fmt.Errorf("failed to parse callback data: %w", err)
 	}
+	c, err := r.resolveCallbackChat(gid)
+	if err != nil {
+		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
+	}
 
 	// restore original button layout
+	approveData, rejectData, banReporterData := r.reportCallbackData(c, reportedUserID, msgID)
 	keyboard := tbapi.NewInlineKeyboardMarkup(
 		tbapi.NewInlineKeyboardRow(
-			tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", fmt.Sprintf("R+%d:%d", reportedUserID, msgID)),
-			tbapi.NewInlineKeyboardButtonData("❌ Reject", fmt.Sprintf("R-%d:%d", reportedUserID, msgID)),
-			tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", fmt.Sprintf("R?%d:%d", reportedUserID, msgID)),
+			tbapi.NewInlineKeyboardButtonData("✅ Approve Ban", approveData),
+			tbapi.NewInlineKeyboardButtonData("❌ Reject", rejectData),
+			tbapi.NewInlineKeyboardButtonData("⛔️ Ban Reporter", banReporterData),
 		),
 	)
 

@@ -2131,11 +2131,11 @@ func TestUserReports_CallbackReportBanReporterAsk(t *testing.T) {
 					assert.Equal(t, 999, editMarkup.MessageID)
 					require.Len(t, editMarkup.ReplyMarkup.InlineKeyboard, 3)
 					assert.Equal(t, "Ban reporter1", editMarkup.ReplyMarkup.InlineKeyboard[0][0].Text)
-					assert.Equal(t, "R!111:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][0].CallbackData)
+					assert.Equal(t, "R!default:111:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][0].CallbackData)
 					assert.Equal(t, "Ban reporter2", editMarkup.ReplyMarkup.InlineKeyboard[1][0].Text)
-					assert.Equal(t, "R!222:100", *editMarkup.ReplyMarkup.InlineKeyboard[1][0].CallbackData)
+					assert.Equal(t, "R!default:222:100", *editMarkup.ReplyMarkup.InlineKeyboard[1][0].CallbackData)
 					assert.Equal(t, "Cancel", editMarkup.ReplyMarkup.InlineKeyboard[2][0].Text)
-					assert.Equal(t, "RX666:100", *editMarkup.ReplyMarkup.InlineKeyboard[2][0].CallbackData)
+					assert.Equal(t, "RXdefault:666:100", *editMarkup.ReplyMarkup.InlineKeyboard[2][0].CallbackData)
 				}
 				return tbapi.Message{}, nil
 			},
@@ -2290,17 +2290,17 @@ func TestUserReports_CallbackReportCancel(t *testing.T) {
 					require.Len(t, editMarkup.ReplyMarkup.InlineKeyboard, 1, "should have 1 row of buttons")
 					require.Len(t, editMarkup.ReplyMarkup.InlineKeyboard[0], 3, "row should have 3 buttons")
 					assert.Equal(t, "✅ Approve Ban", editMarkup.ReplyMarkup.InlineKeyboard[0][0].Text)
-					assert.Equal(t, "R+666:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][0].CallbackData)
+					assert.Equal(t, "R+default:666:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][0].CallbackData)
 					assert.Equal(t, "❌ Reject", editMarkup.ReplyMarkup.InlineKeyboard[0][1].Text)
-					assert.Equal(t, "R-666:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][1].CallbackData)
+					assert.Equal(t, "R-default:666:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][1].CallbackData)
 					assert.Equal(t, "⛔️ Ban Reporter", editMarkup.ReplyMarkup.InlineKeyboard[0][2].Text)
-					assert.Equal(t, "R?666:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][2].CallbackData)
+					assert.Equal(t, "R?default:666:100", *editMarkup.ReplyMarkup.InlineKeyboard[0][2].CallbackData)
 				}
 				return tbapi.Message{}, nil
 			},
 		}
 
-		rep := &userReports{tbAPI: mockAPI}
+		rep := &userReports{tbAPI: mockAPI, chats: []*ChatContext{{GID: "default", PrimaryChatID: 200}}}
 
 		query := &tbapi.CallbackQuery{
 			Data:    "RX666:100",
@@ -2542,5 +2542,144 @@ func TestUserReports_HandleReportCallback_SecurityValidation(t *testing.T) {
 		err := rep.HandleReportCallback(context.Background(), query)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown report callback")
+	})
+}
+
+func TestUserReports_resolveCallbackChat(t *testing.T) {
+	chatA := &ChatContext{GID: "ga", PrimaryChatID: 100}
+	chatB := &ChatContext{GID: "gb", PrimaryChatID: 200}
+
+	t.Run("empty gid in single-chat mode falls back to chats[0]", func(t *testing.T) {
+		r := &userReports{chats: []*ChatContext{chatA}}
+		c, err := r.resolveCallbackChat("")
+		require.NoError(t, err)
+		assert.Same(t, chatA, c)
+	})
+
+	t.Run("empty gid in multi-chat mode is rejected", func(t *testing.T) {
+		r := &userReports{chats: []*ChatContext{chatA, chatB}, byGID: map[string]*ChatContext{"ga": chatA, "gb": chatB}}
+		_, err := r.resolveCallbackChat("")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "legacy callback without gid in multi-chat mode")
+	})
+
+	t.Run("explicit gid resolves via byGID", func(t *testing.T) {
+		r := &userReports{chats: []*ChatContext{chatA, chatB}, byGID: map[string]*ChatContext{"ga": chatA, "gb": chatB}}
+		c, err := r.resolveCallbackChat("gb")
+		require.NoError(t, err)
+		assert.Same(t, chatB, c)
+	})
+
+	t.Run("unknown gid is rejected", func(t *testing.T) {
+		r := &userReports{chats: []*ChatContext{chatA}, byGID: map[string]*ChatContext{"ga": chatA}}
+		_, err := r.resolveCallbackChat("missing")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown gid in callback")
+	})
+}
+
+func TestUserReports_reportCallbackPayload(t *testing.T) {
+	t.Run("nil chat emits legacy 2-part", func(t *testing.T) {
+		assert.Equal(t, "R+666:100", reportCallbackPayload(nil, "R+", 666, 100))
+		assert.Equal(t, "R-666:100", reportCallbackPayload(nil, "R-", 666, 100))
+	})
+
+	t.Run("empty gid emits legacy 2-part", func(t *testing.T) {
+		c := &ChatContext{GID: "", PrimaryChatID: 200}
+		assert.Equal(t, "R+666:100", reportCallbackPayload(c, "R+", 666, 100))
+	})
+
+	t.Run("non-empty gid emits 3-part", func(t *testing.T) {
+		c := &ChatContext{GID: "gb", PrimaryChatID: 200}
+		assert.Equal(t, "R+gb:666:100", reportCallbackPayload(c, "R+", 666, 100))
+		assert.Equal(t, "RXgb:666:100", reportCallbackPayload(c, "RX", 666, 100))
+	})
+}
+
+func TestUserReports_CallbackReportBan_ThreePartGIDRouting(t *testing.T) {
+	chatA := &ChatContext{GID: "ga", PrimaryChatID: 100}
+	chatB := &ChatContext{GID: "gb", PrimaryChatID: 200}
+
+	mockReports := &mocks.ReportsMock{
+		GetByMessageFunc: func(ctx context.Context, msgID int, chatID int64) ([]storage.Report, error) {
+			return []storage.Report{{
+				MsgID: msgID, ChatID: chatID,
+				ReportedUserID: 666, ReportedUserName: "spammer",
+				ReporterUserID: 111, ReporterUserName: "reporter1",
+				MsgText: "spam",
+			}}, nil
+		},
+		DeleteByMessageFunc: func(ctx context.Context, msgID int, chatID int64) error { return nil },
+	}
+
+	mockBot := &mocks.BotMock{
+		RemoveApprovedUserFunc: func(id int64) error { return nil },
+		UpdateSpamFunc:         func(msg string) error { return nil },
+	}
+
+	t.Run("explicit gid resolves to non-default chat", func(t *testing.T) {
+		mockAPI := &mocks.TbAPIMock{
+			SendFunc:    func(c tbapi.Chattable) (tbapi.Message, error) { return tbapi.Message{}, nil },
+			RequestFunc: func(c tbapi.Chattable) (*tbapi.APIResponse, error) { return &tbapi.APIResponse{}, nil },
+		}
+		rep := &userReports{
+			tbAPI: mockAPI, bot: mockBot,
+			chats:        []*ChatContext{chatA, chatB},
+			byGID:        map[string]*ChatContext{"ga": chatA, "gb": chatB},
+			ReportConfig: ReportConfig{Storage: mockReports},
+		}
+		query := &tbapi.CallbackQuery{
+			Data:    "R+gb:666:100",
+			From:    &tbapi.User{UserName: "admin"},
+			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}, MessageID: 999, Text: "spam", Date: int(time.Now().Unix())},
+		}
+		err := rep.callbackReportBan(context.Background(), chatA, query)
+		require.NoError(t, err)
+		// verify GetByMessage was called with chatB.PrimaryChatID
+		calls := mockReports.GetByMessageCalls()
+		require.NotEmpty(t, calls)
+		assert.Equal(t, int64(200), calls[0].ChatID, "should look up reports using chatB.PrimaryChatID")
+	})
+
+	t.Run("legacy 2-part rejected in multi-chat", func(t *testing.T) {
+		mockAPI := &mocks.TbAPIMock{
+			SendFunc:    func(c tbapi.Chattable) (tbapi.Message, error) { return tbapi.Message{}, nil },
+			RequestFunc: func(c tbapi.Chattable) (*tbapi.APIResponse, error) { return &tbapi.APIResponse{}, nil },
+		}
+		rep := &userReports{
+			tbAPI: mockAPI, bot: mockBot,
+			chats:        []*ChatContext{chatA, chatB},
+			byGID:        map[string]*ChatContext{"ga": chatA, "gb": chatB},
+			ReportConfig: ReportConfig{Storage: mockReports},
+		}
+		query := &tbapi.CallbackQuery{
+			Data:    "R+666:100",
+			From:    &tbapi.User{UserName: "admin"},
+			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}, MessageID: 999, Text: "spam", Date: int(time.Now().Unix())},
+		}
+		err := rep.callbackReportBan(context.Background(), chatA, query)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "legacy callback without gid in multi-chat mode")
+	})
+
+	t.Run("unknown gid is rejected", func(t *testing.T) {
+		mockAPI := &mocks.TbAPIMock{
+			SendFunc:    func(c tbapi.Chattable) (tbapi.Message, error) { return tbapi.Message{}, nil },
+			RequestFunc: func(c tbapi.Chattable) (*tbapi.APIResponse, error) { return &tbapi.APIResponse{}, nil },
+		}
+		rep := &userReports{
+			tbAPI: mockAPI, bot: mockBot,
+			chats:        []*ChatContext{chatA, chatB},
+			byGID:        map[string]*ChatContext{"ga": chatA, "gb": chatB},
+			ReportConfig: ReportConfig{Storage: mockReports},
+		}
+		query := &tbapi.CallbackQuery{
+			Data:    "R+missing:666:100",
+			From:    &tbapi.User{UserName: "admin"},
+			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 456}, MessageID: 999, Text: "spam", Date: int(time.Now().Unix())},
+		}
+		err := rep.callbackReportBan(context.Background(), chatA, query)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown gid in callback")
 	})
 }

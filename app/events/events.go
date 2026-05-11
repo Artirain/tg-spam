@@ -402,35 +402,46 @@ func transform(msg *tbapi.Message) *bot.Message {
 	return &message
 }
 
-// parseCallbackData parses callback data format: [prefix]userID:msgID
-// prefix can be: ?, +, !, or two-char report prefixes (R+, R-, R?, R!, RX)
-func parseCallbackData(data string) (userID int64, msgID int, err error) {
+// parseCallbackData parses callback data and returns the gid (empty for legacy
+// two-part payloads), userID and msgID. supported prefixes are stripped before
+// splitting: single-char admin prefixes (?, +, !) and two-char report prefixes
+// (R+, R-, R?, R!, RX). the remaining payload is either userID:msgID (legacy)
+// or gid:userID:msgID (new). callers receiving gid="" route to chats[0] in
+// single-chat mode and reject the callback in multi-chat mode.
+func parseCallbackData(data string) (gid string, userID int64, msgID int, err error) {
 	if len(data) < 3 {
-		return 0, 0, fmt.Errorf("unexpected callback data, too short %q", data)
+		return "", 0, 0, fmt.Errorf("unexpected callback data, too short %q", data)
 	}
 
 	// remove prefix if present from the parsed data
-	// check for two-char report prefixes first (R+, R-, R?, R!, RX)
-	if len(data) >= 3 && data[:1] == "R" {
+	// check for two-char report prefixes first (R+, R-, R?, R!, RX), then admin prefixes
+	switch data[:1] {
+	case "R":
 		// two-char report prefix
 		data = data[2:]
-	} else if data[:1] == "?" || data[:1] == "+" || data[:1] == "!" {
-		// single-char prefix
+	case "?", "+", "!":
+		// single-char admin prefix
 		data = data[1:]
 	}
 
 	parts := strings.Split(data, ":")
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("unexpected callback data, should have both ids %q", data)
+	switch len(parts) {
+	case 2:
+		// legacy two-part: userID:msgID
+	case 3:
+		gid = parts[0]
+		parts = parts[1:]
+	default:
+		return "", 0, 0, fmt.Errorf("unexpected callback data, want 2 or 3 parts, got %d: %q", len(parts), data)
 	}
 	if userID, err = strconv.ParseInt(parts[0], 10, 64); err != nil {
-		return 0, 0, fmt.Errorf("failed to parse userID %q: %w", parts[0], err)
+		return "", 0, 0, fmt.Errorf("failed to parse userID %q: %w", parts[0], err)
 	}
 	if msgID, err = strconv.Atoi(parts[1]); err != nil {
-		return 0, 0, fmt.Errorf("failed to parse msgID %q: %w", parts[1], err)
+		return "", 0, 0, fmt.Errorf("failed to parse msgID %q: %w", parts[1], err)
 	}
 
-	return userID, msgID, nil
+	return gid, userID, msgID, nil
 }
 
 // channelIDFromCallback returns the channel ID if the parsed callback ID is negative (channel),

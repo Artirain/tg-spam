@@ -56,6 +56,24 @@ func (a *admin) defaultChat() *ChatContext {
 	return a.chats[0]
 }
 
+// resolveCallbackChat resolves a ChatContext from a callback-encoded gid.
+// gid="" falls back to chats[0] in single-chat mode; multi-chat mode rejects
+// the callback with an error so legacy two-part payloads never silently route
+// to the wrong group.
+func (a *admin) resolveCallbackChat(gid string) (*ChatContext, error) {
+	if gid == "" {
+		if len(a.chats) == 1 {
+			return a.chats[0], nil
+		}
+		return nil, fmt.Errorf("legacy callback without gid in multi-chat mode")
+	}
+	c, ok := a.byGID[gid]
+	if !ok {
+		return nil, fmt.Errorf("unknown gid in callback: %q", gid)
+	}
+	return c, nil
+}
+
 const (
 	confirmationPrefix = "?"
 	banPrefix          = "+"
@@ -63,7 +81,7 @@ const (
 )
 
 // ReportBan a ban message to admin chat with a button to unban the user
-func (a *admin) ReportBan(_ *ChatContext, banUserStr string, msg *bot.Message) {
+func (a *admin) ReportBan(c *ChatContext, banUserStr string, msg *bot.Message) {
 	log.Printf("[DEBUG] report to admin chat, ban msgsData for %s, group: %d", banUserStr, a.adminChatID)
 	msgText := msg.Text
 	if msg.Quote != "" {
@@ -95,7 +113,11 @@ func (a *admin) ReportBan(_ *ChatContext, banUserStr string, msg *bot.Message) {
 			would, escapeMarkDownV1Text(banUserStr), msg.SenderChat.ID)
 	}
 	forwardMsg := fmt.Sprintf("%s\n\n%s\n\n", banLine, text)
-	if err := a.sendWithUnbanMarkup(forwardMsg, "change ban", callbackUser, msg.ID, a.adminChatID); err != nil {
+	gid := ""
+	if c != nil {
+		gid = c.GID
+	}
+	if err := a.sendWithUnbanMarkup(forwardMsg, "change ban", gid, callbackUser, msg.ID, a.adminChatID); err != nil {
 		log.Printf("[WARN] failed to send admin message, %v", err)
 	}
 }
@@ -825,7 +847,8 @@ func (a *admin) InlineCallbackHandler(query *tbapi.CallbackQuery) error {
 }
 
 // callbackAskBanConfirmation sends a confirmation message to admin chat with two buttons: "unban" and "keep it banned"
-// callback data: ?userID:msgID
+// callback data: ?[gid:]userID:msgID; the gid (if present) is preserved on the
+// new buttons so the follow-up callbacks route back to the same chat.
 func (a *admin) callbackAskBanConfirmation(_ *ChatContext, query *tbapi.CallbackQuery) error {
 	callbackData := query.Data
 
@@ -834,7 +857,8 @@ func (a *admin) callbackAskBanConfirmation(_ *ChatContext, query *tbapi.Callback
 		keepBanned = "Confirm ban"
 	}
 
-	// replace button with confirmation/rejection buttons
+	// replace button with confirmation/rejection buttons; payload after "?" already
+	// carries the gid (when present) so we can reuse it verbatim with a new prefix
 	confirmationKeyboard := tbapi.NewInlineKeyboardMarkup(
 		tbapi.NewInlineKeyboardRow(
 			tbapi.NewInlineKeyboardButtonData("Unban for real", callbackData[1:]),     // remove "?" prefix
@@ -850,9 +874,11 @@ func (a *admin) callbackAskBanConfirmation(_ *ChatContext, query *tbapi.Callback
 
 // callbackBanConfirmed handles the callback when user kept banned
 // it clears the keyboard and updates the message text with confirmation of ban kept in place.
-// it also updates spam samples with the original message
-// callback data: +userID:msgID
-func (a *admin) callbackBanConfirmed(c *ChatContext, query *tbapi.CallbackQuery) error {
+// it also updates spam samples with the original message.
+// callback data: +[gid:]userID:msgID — the gid is parsed from the payload and the
+// passed-in ChatContext (best-guess from defaultChat) is ignored in favor of the
+// gid-resolved chat.
+func (a *admin) callbackBanConfirmed(_ *ChatContext, query *tbapi.CallbackQuery) error {
 	// clear keyboard and update message text with confirmation
 	updText := query.Message.Text + fmt.Sprintf("\n\n_ban confirmed by %s in %v_", query.From.UserName, sinceQuery(query))
 	editMsg := tbapi.NewEditMessageText(query.Message.Chat.ID, query.Message.MessageID, updText)
@@ -871,9 +897,13 @@ func (a *admin) callbackBanConfirmed(c *ChatContext, query *tbapi.CallbackQuery)
 		log.Printf("[DEBUG] failed to get clean message: %v", err)
 	}
 
-	userID, msgID, parseErr := parseCallbackData(query.Data)
+	gid, userID, msgID, parseErr := parseCallbackData(query.Data)
 	if parseErr != nil {
 		return fmt.Errorf("failed to parse callback's userID %q: %w", query.Data, parseErr)
+	}
+	c, err := a.resolveCallbackChat(gid)
+	if err != nil {
+		return fmt.Errorf("failed to resolve chat for callback %q: %w", query.Data, err)
 	}
 
 	if a.trainingMode {
@@ -902,9 +932,11 @@ func (a *admin) callbackBanConfirmed(c *ChatContext, query *tbapi.CallbackQuery)
 
 // callbackUnbanConfirmed handles the callback when user unbanned.
 // it clears the keyboard and updates the message text with confirmation of unban.
-// also it unbans the user, adds it to the approved list and updates ham samples with the original message.
-// callback data: userID:msgID
-func (a *admin) callbackUnbanConfirmed(c *ChatContext, query *tbapi.CallbackQuery) error {
+// also it unbans the user, adds it to the approved list and updates ham samples
+// with the original message.
+// callback data: [gid:]userID:msgID — gid is parsed from the payload and the
+// passed-in ChatContext is ignored in favor of the gid-resolved chat.
+func (a *admin) callbackUnbanConfirmed(_ *ChatContext, query *tbapi.CallbackQuery) error {
 	callbackData := query.Data
 	chatID := query.Message.Chat.ID // this is ID of admin chat
 	log.Printf("[DEBUG] unban action activated, chatID: %d, userID: %s", chatID, callbackData)
@@ -914,9 +946,13 @@ func (a *admin) callbackUnbanConfirmed(c *ChatContext, query *tbapi.CallbackQuer
 		return fmt.Errorf("failed to send callback response: %w", err)
 	}
 
-	userID, _, err := parseCallbackData(callbackData)
+	gid, userID, _, err := parseCallbackData(callbackData)
 	if err != nil {
 		return fmt.Errorf("failed to parse callback msgsData %q: %w", callbackData, err)
+	}
+	c, err := a.resolveCallbackChat(gid)
+	if err != nil {
+		return fmt.Errorf("failed to resolve chat for callback %q: %w", callbackData, err)
 	}
 
 	// get the original spam message to update ham samples
@@ -1032,12 +1068,12 @@ func (a *admin) unbanChannel(c *ChatContext, channelID int64) error {
 }
 
 // callbackShowInfo handles the callback when user asks for spam detection details for the ban.
-// callback data: !userID:msgID
+// callback data: ![gid:]userID:msgID
 func (a *admin) callbackShowInfo(_ *ChatContext, query *tbapi.CallbackQuery) error {
 	callbackData := query.Data
 	spamInfoText := "**can't get spam info**"
 	spamInfo := []string{}
-	userID, _, err := parseCallbackData(callbackData)
+	_, userID, _, err := parseCallbackData(callbackData)
 	if err != nil {
 		spamInfo = append(spamInfo, fmt.Sprintf("**failed to parse userID from %q: %v**", callbackData[1:], err))
 	}
@@ -1159,19 +1195,27 @@ func (a *admin) getCleanMessage(msg string) (string, error) {
 // text is message with details and action is the button label to unban,
 // which is user id prefixed with "?" for confirmation.
 // the second button is to show info about the spam analysis.
-func (a *admin) sendWithUnbanMarkup(text, action string, user bot.User, msgID int, chatID int64) error {
-	log.Printf("[DEBUG] action response %q: user %+v, msgID:%d, text: %q",
-		action, user, msgID, strings.ReplaceAll(text, "\n", "\\n"))
+// gid identifies the source chat so the callback routes back to the right group;
+// empty gid produces legacy two-part payloads for backward compat.
+func (a *admin) sendWithUnbanMarkup(text, action, gid string, user bot.User, msgID int, chatID int64) error {
+	log.Printf("[DEBUG] action response %q: user %+v, msgID:%d, gid:%q, text: %q",
+		action, user, msgID, gid, strings.ReplaceAll(text, "\n", "\\n"))
 	tbMsg := tbapi.NewMessage(chatID, text)
 	tbMsg.ParseMode = tbapi.ModeMarkdown
 	tbMsg.LinkPreviewOptions = tbapi.LinkPreviewOptions{IsDisabled: true}
 
+	confirmData := fmt.Sprintf("%s%d:%d", confirmationPrefix, user.ID, msgID)
+	infoData := fmt.Sprintf("%s%d:%d", infoPrefix, user.ID, msgID)
+	if gid != "" {
+		confirmData = fmt.Sprintf("%s%s:%d:%d", confirmationPrefix, gid, user.ID, msgID)
+		infoData = fmt.Sprintf("%s%s:%d:%d", infoPrefix, gid, user.ID, msgID)
+	}
 	tbMsg.ReplyMarkup = tbapi.NewInlineKeyboardMarkup(
 		tbapi.NewInlineKeyboardRow(
-			// ?userID to request confirmation
-			tbapi.NewInlineKeyboardButtonData("⛔︎ "+action, fmt.Sprintf("%s%d:%d", confirmationPrefix, user.ID, msgID)),
-			// !userID to request info
-			tbapi.NewInlineKeyboardButtonData("️⚑ info", fmt.Sprintf("%s%d:%d", infoPrefix, user.ID, msgID)),
+			// ?[gid:]userID:msgID to request confirmation
+			tbapi.NewInlineKeyboardButtonData("⛔︎ "+action, confirmData),
+			// ![gid:]userID:msgID to request info
+			tbapi.NewInlineKeyboardButtonData("️⚑ info", infoData),
 		),
 	)
 

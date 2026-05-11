@@ -879,35 +879,48 @@ func Test_parseCallbackData(t *testing.T) {
 	var tests = []struct {
 		name       string
 		data       string
+		wantGID    string
 		wantUserID int64
 		wantMsgID  int
 		wantErr    bool
 	}{
-		{"Valid data", "12345:678", 12345, 678, false},
-		{"Data too short", "12", 0, 0, true},
-		{"No colon separator", "12345678", 0, 0, true},
-		{"Invalid userID", "abc:678", 0, 0, true},
-		{"Invalid msgID", "12345:xyz", 0, 0, true},
-		{"wrong prefix with valid data", "c12345:678", 0, 0, true},
-		{"valid prefix+ with valid data", "+12345:678", 12345, 678, false},
-		{"valid prefix! with valid data", "!12345:678", 12345, 678, false},
-		{"valid prefix? with valid data", "?12345:678", 12345, 678, false},
-		{"valid prefix R+ with valid data", "R+12345:678", 12345, 678, false},
-		{"valid prefix R- with valid data", "R-12345:678", 12345, 678, false},
-		{"valid prefix R? with valid data", "R?12345:678", 12345, 678, false},
-		{"valid prefix R! with valid data", "R!12345:678", 12345, 678, false},
-		{"valid prefix RX with valid data", "RX12345:678", 12345, 678, false},
-		{"negative channel ID", "-100123456:678", -100123456, 678, false},
-		{"negative channel ID with prefix", "?-100123456:678", -100123456, 678, false},
+		{"Valid data", "12345:678", "", 12345, 678, false},
+		{"Data too short", "12", "", 0, 0, true},
+		{"No colon separator", "12345678", "", 0, 0, true},
+		{"Invalid userID", "abc:678", "", 0, 0, true},
+		{"Invalid msgID", "12345:xyz", "", 0, 0, true},
+		{"wrong prefix with valid data", "c12345:678", "", 0, 0, true},
+		{"valid prefix+ with valid data", "+12345:678", "", 12345, 678, false},
+		{"valid prefix! with valid data", "!12345:678", "", 12345, 678, false},
+		{"valid prefix? with valid data", "?12345:678", "", 12345, 678, false},
+		{"valid prefix R+ with valid data", "R+12345:678", "", 12345, 678, false},
+		{"valid prefix R- with valid data", "R-12345:678", "", 12345, 678, false},
+		{"valid prefix R? with valid data", "R?12345:678", "", 12345, 678, false},
+		{"valid prefix R! with valid data", "R!12345:678", "", 12345, 678, false},
+		{"valid prefix RX with valid data", "RX12345:678", "", 12345, 678, false},
+		{"negative channel ID", "-100123456:678", "", -100123456, 678, false},
+		{"negative channel ID with prefix", "?-100123456:678", "", -100123456, 678, false},
+		{"three-part with gid no prefix", "g1:12345:678", "g1", 12345, 678, false},
+		{"three-part with admin prefix", "?g1:12345:678", "g1", 12345, 678, false},
+		{"three-part with ban prefix", "+default:12345:678", "default", 12345, 678, false},
+		{"three-part with info prefix", "!default:12345:678", "default", 12345, 678, false},
+		{"three-part with report approve prefix", "R+gid2:12345:678", "gid2", 12345, 678, false},
+		{"three-part with report reject prefix", "R-gid2:12345:678", "gid2", 12345, 678, false},
+		{"three-part with report ban-reporter ask prefix", "R?gid2:12345:678", "gid2", 12345, 678, false},
+		{"three-part with report ban-reporter confirm prefix", "R!gid2:12345:678", "gid2", 12345, 678, false},
+		{"three-part with report cancel prefix", "RXgid2:12345:678", "gid2", 12345, 678, false},
+		{"three-part negative channel ID with gid", "?g1:-100123456:678", "g1", -100123456, 678, false},
+		{"too many parts", "a:b:c:d", "", 0, 0, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotUserID, gotMsgID, err := parseCallbackData(tt.data)
+			gotGID, gotUserID, gotMsgID, err := parseCallbackData(tt.data)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
+				assert.Equal(t, tt.wantGID, gotGID)
 				assert.Equal(t, tt.wantUserID, gotUserID)
 				assert.Equal(t, tt.wantMsgID, gotMsgID)
 			}

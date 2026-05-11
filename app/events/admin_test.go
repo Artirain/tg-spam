@@ -2945,3 +2945,120 @@ func TestAdmin_channelDisplayName(t *testing.T) {
 		})
 	}
 }
+
+func TestAdmin_resolveCallbackChat(t *testing.T) {
+	chatA := &ChatContext{GID: "ga", PrimaryChatID: 100}
+	chatB := &ChatContext{GID: "gb", PrimaryChatID: 200}
+
+	t.Run("empty gid in single-chat mode falls back to chats[0]", func(t *testing.T) {
+		a := &admin{chats: []*ChatContext{chatA}}
+		c, err := a.resolveCallbackChat("")
+		require.NoError(t, err)
+		assert.Same(t, chatA, c)
+	})
+
+	t.Run("empty gid in multi-chat mode is rejected", func(t *testing.T) {
+		a := &admin{chats: []*ChatContext{chatA, chatB}, byGID: map[string]*ChatContext{"ga": chatA, "gb": chatB}}
+		_, err := a.resolveCallbackChat("")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "legacy callback without gid in multi-chat mode")
+	})
+
+	t.Run("explicit gid resolves via byGID", func(t *testing.T) {
+		a := &admin{chats: []*ChatContext{chatA, chatB}, byGID: map[string]*ChatContext{"ga": chatA, "gb": chatB}}
+		c, err := a.resolveCallbackChat("gb")
+		require.NoError(t, err)
+		assert.Same(t, chatB, c)
+	})
+
+	t.Run("unknown gid is rejected", func(t *testing.T) {
+		a := &admin{chats: []*ChatContext{chatA}, byGID: map[string]*ChatContext{"ga": chatA}}
+		_, err := a.resolveCallbackChat("unknown")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown gid in callback")
+	})
+}
+
+func TestAdmin_InlineCallback_ThreePartGIDRouting(t *testing.T) {
+	chatA := &ChatContext{GID: "ga", PrimaryChatID: 100}
+	chatB := &ChatContext{GID: "gb", PrimaryChatID: 200}
+
+	mockAPI := &mocks.TbAPIMock{
+		SendFunc:    func(c tbapi.Chattable) (tbapi.Message, error) { return tbapi.Message{}, nil },
+		RequestFunc: func(c tbapi.Chattable) (*tbapi.APIResponse, error) { return &tbapi.APIResponse{}, nil },
+	}
+	mockBot := &mocks.BotMock{
+		UpdateSpamFunc:      func(msg string) error { return nil },
+		UpdateHamFunc:       func(msg string) error { return nil },
+		AddApprovedUserFunc: func(id int64, name string) error { return nil },
+	}
+	mockLocator := &mocks.LocatorMock{
+		SpamFunc:         func(ctx context.Context, userID int64) (storage.SpamData, bool) { return storage.SpamData{}, false },
+		UserNameByIDFunc: func(ctx context.Context, userID int64) string { return "u" },
+	}
+
+	adm := &admin{
+		tbAPI: mockAPI, bot: mockBot, locator: mockLocator,
+		chats: []*ChatContext{chatA, chatB},
+		byGID: map[string]*ChatContext{"ga": chatA, "gb": chatB},
+	}
+
+	t.Run("unban callback routes ban target to gid-resolved chat", func(t *testing.T) {
+		mockAPI.ResetCalls()
+		query := &tbapi.CallbackQuery{
+			ID:      "1",
+			Data:    "gb:777:99",
+			From:    &tbapi.User{UserName: "admin"},
+			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 999}, MessageID: 555, Text: "ban msg"},
+		}
+		err := adm.callbackUnbanConfirmed(chatA, query)
+		require.NoError(t, err)
+		// confirm UnbanChatMember was issued against chatB (gid="gb") not chatA
+		var unbanned bool
+		for _, call := range mockAPI.RequestCalls() {
+			if cfg, ok := call.C.(tbapi.UnbanChatMemberConfig); ok {
+				assert.Equal(t, int64(200), cfg.ChatID, "should use chatB.PrimaryChatID")
+				unbanned = true
+			}
+		}
+		assert.True(t, unbanned, "unban request should be issued")
+	})
+
+	t.Run("ban-confirmed callback uses gid-resolved chat", func(t *testing.T) {
+		mockAPI.ResetCalls()
+		query := &tbapi.CallbackQuery{
+			ID:      "2",
+			Data:    "+gb:888:42",
+			From:    &tbapi.User{UserName: "admin"},
+			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 999}, MessageID: 555, Text: "ban msg"},
+		}
+		err := adm.callbackBanConfirmed(chatA, query)
+		require.NoError(t, err)
+	})
+
+	t.Run("legacy 2-part callback rejected in multi-chat", func(t *testing.T) {
+		mockAPI.ResetCalls()
+		query := &tbapi.CallbackQuery{
+			ID:      "3",
+			Data:    "777:99",
+			From:    &tbapi.User{UserName: "admin"},
+			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 999}, MessageID: 555, Text: "ban msg"},
+		}
+		err := adm.callbackUnbanConfirmed(chatA, query)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "legacy callback without gid in multi-chat mode")
+	})
+
+	t.Run("unknown gid is rejected", func(t *testing.T) {
+		mockAPI.ResetCalls()
+		query := &tbapi.CallbackQuery{
+			ID:      "4",
+			Data:    "+missing:888:42",
+			From:    &tbapi.User{UserName: "admin"},
+			Message: &tbapi.Message{Chat: tbapi.Chat{ID: 999}, MessageID: 555, Text: "ban msg"},
+		}
+		err := adm.callbackBanConfirmed(chatA, query)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown gid in callback")
+	})
+}
