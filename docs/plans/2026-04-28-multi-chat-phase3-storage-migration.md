@@ -1,4 +1,4 @@
-# Multi-Chat Phase 3 — Storage UNIQUE Constraints Migration Plan
+# Multi-Chat Phase 3 — Storage UNIQUE Constraints Migration Plan (v2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -6,11 +6,13 @@
 
 **Architecture:**
 - New schema: surrogate auto-increment `id` PK + composite `UNIQUE(gid, hash)` for `messages`, `UNIQUE(gid, user_id)` for `spam`. Matches the existing `samples`/`approved_users`/`detected_spam`/`warnings` pattern.
-- Create-copy-rename migration (uniform for SQLite and Postgres). Idempotent: detects old schema by inspecting PK and runs only when needed.
-- Backfill: existing `gid = ''` rows already get the instance gid via the existing `migrate()` step (`locator.go:186-194`). Phase 3 migration runs AFTER that backfill in the same `migrate()` transaction, so by the time the new tables are created all rows already have correct gid.
-- Dedup during copy: when the old schema's hash collision spans two chats (which the bug allowed), keep the most recent row per `(gid, hash)` by `time`. Same for spam by `(gid, user_id)`.
+- Create-copy-rename migration (uniform for SQLite and Postgres). Idempotent: detects old PK shape and runs only when needed.
+- **Critical fix vs v1**: the current `migrate()` in `app/storage/locator.go:156-163` has a sentinel early-return — if the `gid` column already exists, it returns without doing anything else. That works for the original two-step migration (add gid column → backfill) but blocks any new step. Phase 3 v2 removes this early return and lets every step run unconditionally: `ALTER TABLE ADD COLUMN` already tolerates duplicate columns; `UPDATE ... WHERE gid = ''` is a no-op when no rows match; the new PK migration has its own detection query and skips when already applied. Every step is independently idempotent.
+- Backfill: existing `gid = ''` rows get the instance gid in the existing `UPDATE messages SET gid = ?` step. Phase 3's PK migration runs AFTER that backfill in the same `migrate()` transaction, so all rows have correct gid before copy.
+- Old PK guaranteed uniqueness on `hash` / `user_id` alone, so the new `UNIQUE(gid, hash)` / `UNIQUE(gid, user_id)` cannot be violated during copy — every old row maps to exactly one new row. The `INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` on copy is defensive against operator-corrupted databases only, not part of the migration invariant.
+- Index recreation: after `DROP TABLE messages` + `RENAME messages_new TO messages`, the old indexes are gone with the old table. The existing `engine.InitTable` flow at `app/storage/engine/engine.go:803-815` runs `CreateIndexes` AFTER `MigrateFunc`, so the indexes from `CmdCreateLocatorIndexes` are re-created on the renamed table at the end of the same transaction. Phase 3 relies on this ordering — no manual index re-creation in the migration helper.
 - Update `CmdAddLocatorMessage` and `CmdAddLocatorSpam` queries to use the new conflict columns: SQLite `ON CONFLICT(gid, hash) DO UPDATE`, Postgres `ON CONFLICT (gid, hash) DO UPDATE`. Same shape for spam with `(gid, user_id)`.
-- Whole migration runs in a single transaction with rollback on any error. Pre-migration row count captured and compared post-migration as a sanity check (logged as warning if it dropped due to conflict dedup, NOT fatal).
+- Whole migration runs in a single transaction with rollback on any error. Pre-migration row count logged for operator visibility; rows are not expected to be lost (no real dedup happens for the invariant-correct data).
 
 **Tech Stack:** Go 1.24+, `app/storage/locator.go`, `app/storage/engine`, sqlx, modernc.org/sqlite, Postgres via pgx. Tests use both in-memory SQLite and the existing containerized Postgres harness in `app/storage/`.
 
@@ -213,28 +215,58 @@ const (
 
 - [ ] **Step 2: Add detection queries (`*NeedsMigration`)**
 
-In SQLite, query `PRAGMA table_info(messages)` and check whether `hash` is `pk = 1`. In Postgres, query `information_schema.table_constraints` for the primary key.
+In SQLite, query `pragma_table_info` and check that `hash` is `pk = 1` (the entire PK is the single column `hash`). In Postgres, query `information_schema` with schema scope and an exact single-column-PK check.
 
 ```go
 Add(CmdMessagesNeedsMigration, engine.Query{
     Sqlite: `SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'hash' AND pk = 1`,
-    Postgres: `SELECT COUNT(*) FROM information_schema.table_constraints tc
+    Postgres: `SELECT COUNT(*) FROM (
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
         JOIN information_schema.key_column_usage kcu
           ON tc.constraint_name = kcu.constraint_name
-        WHERE tc.table_name = 'messages' AND tc.constraint_type = 'PRIMARY KEY'
-          AND kcu.column_name = 'hash'`,
+         AND tc.table_schema    = kcu.table_schema
+        WHERE tc.table_schema    = current_schema()
+          AND tc.table_name      = 'messages'
+          AND tc.constraint_type = 'PRIMARY KEY'
+    ) pk_cols WHERE pk_cols.column_name = 'hash'
+      AND (SELECT COUNT(*) FROM (
+        SELECT kcu2.column_name
+        FROM information_schema.table_constraints tc2
+        JOIN information_schema.key_column_usage kcu2
+          ON tc2.constraint_name = kcu2.constraint_name
+         AND tc2.table_schema    = kcu2.table_schema
+        WHERE tc2.table_schema    = current_schema()
+          AND tc2.table_name      = 'messages'
+          AND tc2.constraint_type = 'PRIMARY KEY'
+      ) pkc2) = 1`,
 }).
 Add(CmdSpamNeedsMigration, engine.Query{
     Sqlite: `SELECT COUNT(*) FROM pragma_table_info('spam') WHERE name = 'user_id' AND pk = 1`,
-    Postgres: `SELECT COUNT(*) FROM information_schema.table_constraints tc
+    Postgres: `SELECT COUNT(*) FROM (
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
         JOIN information_schema.key_column_usage kcu
           ON tc.constraint_name = kcu.constraint_name
-        WHERE tc.table_name = 'spam' AND tc.constraint_type = 'PRIMARY KEY'
-          AND kcu.column_name = 'user_id'`,
+         AND tc.table_schema    = kcu.table_schema
+        WHERE tc.table_schema    = current_schema()
+          AND tc.table_name      = 'spam'
+          AND tc.constraint_type = 'PRIMARY KEY'
+    ) pk_cols WHERE pk_cols.column_name = 'user_id'
+      AND (SELECT COUNT(*) FROM (
+        SELECT kcu2.column_name
+        FROM information_schema.table_constraints tc2
+        JOIN information_schema.key_column_usage kcu2
+          ON tc2.constraint_name = kcu2.constraint_name
+         AND tc2.table_schema    = kcu2.table_schema
+        WHERE tc2.table_schema    = current_schema()
+          AND tc2.table_name      = 'spam'
+          AND tc2.constraint_type = 'PRIMARY KEY'
+      ) pkc2) = 1`,
 }).
 ```
 
-Both return `1` when migration is needed (old PK is `hash` / `user_id`), `0` when already migrated.
+Both return `1` when migration is needed (PK is exactly the single column `hash` / `user_id`), `0` when already on the new surrogate-id PK.
 
 - [ ] **Step 3: Add create-new-table queries**
 
@@ -341,12 +373,43 @@ Expected: clean.
 
 ## Task 3: Wire the migration into `Locator.migrate`
 
-Add the migration logic to the existing `migrate` method in `app/storage/locator.go` (currently ends around line 200). The migration runs INSIDE the existing transaction, AFTER the gid-backfill, BEFORE the final `log.Printf`.
+This is the most delicate change in Phase 3. **The existing `migrate()` has a sentinel early-return** (`app/storage/locator.go:158-163`) that fires when the `gid` column already exists, blocking any subsequent step. For Phase 2 installs (which already have the gid column) this would prevent the new PK migration from running. Fix: remove the early return and rely on each step being idempotent (`ALTER TABLE ADD COLUMN` tolerates duplicate columns; `UPDATE ... WHERE gid = ''` is a no-op when no rows match; the new PK migration has its own detection query).
 
 **Files:**
 - Modify: `app/storage/locator.go`
 
-- [ ] **Step 1: Find the existing migration body**
+- [ ] **Step 1: Remove the early-return sentinel**
+
+In `app/storage/locator.go` around lines 156-163, replace:
+
+```go
+func (l *Locator) migrate(ctx context.Context, tx *sqlx.Tx, gid string) error {
+    // try to select with new structure, if works - already migrated
+    var count int
+    err := tx.GetContext(ctx, &count, "SELECT COUNT(*) FROM messages WHERE gid = ''")
+    if err == nil {
+        log.Printf("[DEBUG] locator tables already migrated")
+        return nil
+    }
+
+    // add gid column to messages
+    addGIDMessagesQuery, err := locatorQueries.Pick(...)
+```
+
+with:
+
+```go
+func (l *Locator) migrate(ctx context.Context, tx *sqlx.Tx, gid string) error {
+    // each migration step below is independently idempotent; the function runs
+    // unconditionally and the steps short-circuit when their work is already done.
+
+    // add gid column to messages
+    addGIDMessagesQuery, err := locatorQueries.Pick(...)
+```
+
+(keep the rest of the body unchanged, plus add the new helper calls in Step 2.)
+
+- [ ] **Step 2: Find the existing migration body**
 
 ```bash
 grep -n "log.Printf.*locator tables migrated" app/storage/locator.go
@@ -354,7 +417,7 @@ grep -n "log.Printf.*locator tables migrated" app/storage/locator.go
 
 Note the line. The migration insertion point is immediately before that log.
 
-- [ ] **Step 2: Insert migration steps**
+- [ ] **Step 3: Insert migration steps**
 
 Just before `log.Printf("[DEBUG] locator tables migrated")`, insert:
 
@@ -374,7 +437,7 @@ if err := migrateLocatorTable(ctx, tx, l, "spam",
 }
 ```
 
-- [ ] **Step 3: Add the helper function**
+- [ ] **Step 4: Add the helper function**
 
 At the bottom of `app/storage/locator.go` (file-private):
 
@@ -430,13 +493,13 @@ func migrateLocatorTable(
 
 Add `"github.com/jmoiron/sqlx"` to imports if not present. The current file uses `l.SQL.GetContext` patterns; adapt if the actual function signatures differ.
 
-- [ ] **Step 4: Build**
+- [ ] **Step 5: Build**
 
 ```bash
 go build ./...
 ```
 
-- [ ] **Step 5: Try the locator tests — many will pass now because migration runs automatically**
+- [ ] **Step 6: Try the locator tests — many will pass now because migration runs automatically**
 
 ```bash
 go test -race ./app/storage/ -run TestLocator -v 2>&1 | tail -40
@@ -471,21 +534,23 @@ Be conservative: only modify what the schema change forces. Do NOT refactor test
 
 - [ ] **Step 3: Add a new cross-chat coexistence test**
 
+Per Codex review: the test must use ONE root DB + `WithGID` (shared table). Two independent `:memory:` connections each have their own table and would not exercise the constraint at all.
+
 Add to `app/storage/locator_test.go`:
 
 ```go
 func TestLocator_CrossChat_SameHashCoexists(t *testing.T) {
     ctx := context.Background()
-    db, err := engine.New(ctx, ":memory:", "instance-a")
+    rootDB, err := engine.New(ctx, ":memory:", "instance-a")
     require.NoError(t, err)
-    defer db.Close()
+    defer rootDB.Close()
 
-    locA, err := NewLocator(ctx, time.Hour, 0, db)
+    locA, err := NewLocator(ctx, time.Hour, 0, rootDB)
     require.NoError(t, err)
     require.NoError(t, locA.AddMessage(ctx, "hello", 100, 1, "user1", 10))
 
-    // scope the same DB to a different gid (simulates Phase 4 multi-chat wiring)
-    dbB := db.WithGID("instance-b")
+    // scope the SAME root DB to a different gid; same underlying table
+    dbB := rootDB.WithGID("instance-b")
     locB, err := NewLocator(ctx, time.Hour, 0, dbB)
     require.NoError(t, err)
     require.NoError(t, locB.AddMessage(ctx, "hello", 200, 2, "user2", 20))
@@ -506,15 +571,15 @@ Add analogous `TestLocator_CrossChat_SameUserCoexists` for the spam table:
 ```go
 func TestLocator_CrossChat_SameUserCoexists(t *testing.T) {
     ctx := context.Background()
-    db, err := engine.New(ctx, ":memory:", "instance-a")
+    rootDB, err := engine.New(ctx, ":memory:", "instance-a")
     require.NoError(t, err)
-    defer db.Close()
+    defer rootDB.Close()
 
-    locA, err := NewLocator(ctx, time.Hour, 0, db)
+    locA, err := NewLocator(ctx, time.Hour, 0, rootDB)
     require.NoError(t, err)
     require.NoError(t, locA.AddSpam(ctx, 555, []spamcheck.Response{{Name: "test", Spam: true}}))
 
-    dbB := db.WithGID("instance-b")
+    dbB := rootDB.WithGID("instance-b")
     locB, err := NewLocator(ctx, time.Hour, 0, dbB)
     require.NoError(t, err)
     require.NoError(t, locB.AddSpam(ctx, 555, []spamcheck.Response{{Name: "test", Spam: true}}))
@@ -655,11 +720,18 @@ func TestLocator_Migration_FromLegacySchema(t *testing.T) {
     meta, ok := loc.Message(ctx, "abc")
     require.True(t, ok, "legacy row must survive migration")
     assert.Equal(t, int64(100), meta.ChatID)
-    assert.Equal(t, "test-instance", meta.UserName) // backfill set gid; row visible
+    assert.Equal(t, "u", meta.UserName, "user_name column preserved through migration")
+
+    // verify gid was backfilled to the instance id (Locator.Message already filters by gid,
+    // so the row being returned at all proves the backfill worked; an explicit SQL check
+    // confirms the value)
+    var gid string
+    require.NoError(t, db.GetContext(ctx, &gid, "SELECT gid FROM messages WHERE hash = ?", "abc"))
+    assert.Equal(t, "test-instance", gid)
 }
 ```
 
-The exact assertions depend on the existing `MsgMeta` struct shape — read it and adapt. The point is to assert the legacy row survives and is queryable under the new schema with backfilled gid.
+The `MsgMeta` struct has fields `Time`, `ChatID`, `UserID`, `UserName`, `MsgID` — no `gid` field. Verify the backfill via a direct SQL query, not the MsgMeta struct.
 
 - [ ] **Step 2: Run**
 
@@ -712,6 +784,81 @@ git commit -m "Test postgres legacy schema migration"
 
 ---
 
+## Task 7b: Verify indexes exist after migration
+
+Cursor + Codex flagged that the old indexes are dropped along with the old table. The existing `engine.InitTable` flow re-creates indexes after `MigrateFunc`, so this should work — but lock the contract with a test.
+
+**Files:**
+- Modify: `app/storage/locator_test.go`
+
+- [ ] **Step 1: Write the test**
+
+```go
+func TestLocator_Migration_IndexesRecreated(t *testing.T) {
+    ctx := context.Background()
+    db, err := engine.New(ctx, ":memory:", "test-instance")
+    require.NoError(t, err)
+    defer db.Close()
+
+    // seed legacy schema (no indexes yet — they'll be created via InitTable)
+    _, err = db.ExecContext(ctx, `CREATE TABLE messages (
+        hash TEXT PRIMARY KEY,
+        gid TEXT NOT NULL DEFAULT '',
+        time TIMESTAMP,
+        chat_id INTEGER,
+        user_id INTEGER,
+        user_name TEXT,
+        msg_id INTEGER
+    )`)
+    require.NoError(t, err)
+    _, err = db.ExecContext(ctx, `CREATE TABLE spam (
+        user_id INTEGER PRIMARY KEY,
+        gid TEXT NOT NULL DEFAULT '',
+        time TIMESTAMP,
+        checks TEXT
+    )`)
+    require.NoError(t, err)
+
+    // trigger migration via NewLocator → InitTable → migrate → CreateIndexes
+    _, err = NewLocator(ctx, time.Hour, 0, db)
+    require.NoError(t, err)
+
+    // verify expected indexes exist after migration
+    expectedIndexes := []string{
+        "idx_messages_user_id",
+        "idx_messages_user_name",
+        "idx_spam_time",
+        "idx_messages_gid",
+        "idx_messages_gid_user_id_time",
+        "idx_spam_gid",
+    }
+    for _, idx := range expectedIndexes {
+        var name string
+        err := db.GetContext(ctx, &name,
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", idx)
+        require.NoError(t, err, "index %s missing after migration", idx)
+        assert.Equal(t, idx, name)
+    }
+}
+```
+
+If the expected index names differ from the SQLite ones in `CmdCreateLocatorIndexes`, adjust the list to match.
+
+- [ ] **Step 2: Run**
+
+```bash
+go test -race ./app/storage/ -run TestLocator_Migration_IndexesRecreated -v
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/storage/locator_test.go
+git commit -m "Test locator indexes recreated after migration"
+```
+
+---
+
 ## Task 8: Final verification
 
 - [ ] **Step 1: Full module test**
@@ -748,11 +895,12 @@ git push fork multichat/phase3-storage-migration
 | `spam` UNIQUE(gid, user_id) | Task 1 (fresh) + Task 3 (migration) |
 | INSERT ON CONFLICT updated for new keys | Task 1 |
 | Create-copy-drop-rename migration | Task 2 + Task 3 |
-| Idempotent (detect-and-skip) | Task 3 (cmdNeeds query) + Task 5 |
+| Idempotent (detect-and-skip + no early return) | Task 3 (cmdNeeds query, removed sentinel) + Task 5 |
 | Backfill coordinated with existing migrate() | Task 3 (runs after backfill) |
-| Cross-chat coexistence test | Task 4 |
+| Cross-chat coexistence test (shared table via WithGID) | Task 4 |
 | Legacy-schema migration test | Task 6 |
 | Postgres parity | Task 7 (best-effort) |
+| Indexes recreated after RENAME | Task 7b (verify InitTable re-creates them) |
 
 Out of scope:
 - Listener routing (Phase 4)
