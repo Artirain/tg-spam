@@ -180,9 +180,18 @@ func (l *TelegramListener) Do(ctx context.Context) error {
 		}
 	}
 
+	adminChats := l.Chats
+	if len(adminChats) == 0 && l.chatID != 0 {
+		// legacy fallback for tests constructed without Chats
+		adminChats = []*ChatContext{{
+			Group: l.Group, GID: "default",
+			PrimaryChatID: l.chatID, LinkedChannelID: l.linkedChannelID,
+		}}
+	}
+
 	l.adminHandler = &admin{
 		tbAPI: l.TbAPI, bot: l.Bot, locator: l.Locator, superUsers: l.SuperUsers,
-		primChatID: l.chatID, adminChatID: l.adminChatID,
+		chats: adminChats, byGID: l.byGID, adminChatID: l.adminChatID,
 		trainingMode: l.TrainingMode, softBan: l.SoftBanMode, dry: l.Dry, warnMsg: l.WarnMsg,
 		aggressiveCleanup: l.AggressiveCleanup, aggressiveCleanupLimit: l.AggressiveCleanupLimit,
 		warnings: l.Warnings, warnThreshold: l.WarnThreshold, warnWindow: l.WarnWindow,
@@ -492,7 +501,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 
 		if l.SuperUsers.IsSuper(msg.From.Username, msg.From.ID) {
 			if l.TrainingMode {
-				l.adminHandler.ReportBan(banUserStr, msg)
+				l.adminHandler.ReportBan(c, banUserStr, msg)
 			}
 			log.Printf("[DEBUG] superuser %s requested ban, ignored", banUserStr)
 			return nil
@@ -503,7 +512,7 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 		if err := banUserOrChannel(banReq); err != nil {
 			errs = multierror.Append(errs, fmt.Errorf("failed to ban %s: %w", banUserStr, err))
 		} else if l.adminChatID != 0 && msg.From.ID != 0 {
-			l.adminHandler.ReportBan(banUserStr, msg)
+			l.adminHandler.ReportBan(c, banUserStr, msg)
 		}
 	}
 
@@ -529,23 +538,23 @@ func (l *TelegramListener) procEvents(c *ChatContext, update tbapi.Update) error
 }
 
 // procSuperReply processes superuser commands (reply) /spam, /ban, /warn
-func (l *TelegramListener) procSuperReply(_ *ChatContext, update tbapi.Update) (handled bool) {
+func (l *TelegramListener) procSuperReply(c *ChatContext, update tbapi.Update) (handled bool) {
 	switch {
 	case strings.EqualFold(update.Message.Text, "/spam") || strings.EqualFold(update.Message.Text, "spam"):
 		log.Printf("[DEBUG] superuser %s reported spam", update.Message.From.UserName)
-		if err := l.adminHandler.DirectSpamReport(update); err != nil {
+		if err := l.adminHandler.DirectSpamReport(c, update); err != nil {
 			log.Printf("[WARN] failed to process direct spam report: %v", err)
 		}
 		return true
 	case strings.EqualFold(update.Message.Text, "/ban") || strings.EqualFold(update.Message.Text, "ban"):
 		log.Printf("[DEBUG] superuser %s requested ban", update.Message.From.UserName)
-		if err := l.adminHandler.DirectBanReport(update); err != nil {
+		if err := l.adminHandler.DirectBanReport(c, update); err != nil {
 			log.Printf("[WARN] failed to process direct ban request: %v", err)
 		}
 		return true
 	case strings.EqualFold(update.Message.Text, "/warn") || strings.EqualFold(update.Message.Text, "warn"):
 		log.Printf("[DEBUG] superuser %s requested warning", update.Message.From.UserName)
-		if err := l.adminHandler.DirectWarnReport(update); err != nil {
+		if err := l.adminHandler.DirectWarnReport(c, update); err != nil {
 			log.Printf("[WARN] failed to process direct warning request: %v", err)
 		}
 		return true

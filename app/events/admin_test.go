@@ -26,6 +26,7 @@ func TestAdmin_reportBan(t *testing.T) {
 
 	adm := admin{
 		tbAPI:       mockAPI,
+		chats:       []*ChatContext{{GID: "default", PrimaryChatID: 0}},
 		adminChatID: 123,
 	}
 
@@ -38,7 +39,7 @@ func TestAdmin_reportBan(t *testing.T) {
 
 	t.Run("normal user name", func(t *testing.T) {
 		mockAPI.ResetCalls()
-		adm.ReportBan("testUser", msg)
+		adm.ReportBan(adm.chats[0], "testUser", msg)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
 		t.Logf("sent text: %+v", mockAPI.SendCalls()[0].C.(tbapi.MessageConfig).Text)
@@ -52,7 +53,7 @@ func TestAdmin_reportBan(t *testing.T) {
 
 	t.Run("name with md chars", func(t *testing.T) {
 		mockAPI.ResetCalls()
-		adm.ReportBan("test_User", msg)
+		adm.ReportBan(adm.chats[0], "test_User", msg)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
 		t.Logf("sent text: %+v", mockAPI.SendCalls()[0].C.(tbapi.MessageConfig).Text)
@@ -71,7 +72,7 @@ func TestAdmin_reportBan(t *testing.T) {
 			Text:  "Спасибо!!",
 			Quote: "Бесплатный VPN для Telegram",
 		}
-		adm.ReportBan("spammer", msgWithQuote)
+		adm.ReportBan(adm.chats[0], "spammer", msgWithQuote)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
 		sentText := mockAPI.SendCalls()[0].C.(tbapi.MessageConfig).Text
@@ -198,11 +199,12 @@ func TestAdmin_dryModeForwardMessage(t *testing.T) {
 	}
 	adm := admin{
 		tbAPI: mockAPI,
+		chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 		dry:   true,
 	}
 	msg := &bot.Message{}
 
-	adm.ReportBan("testUser", msg)
+	adm.ReportBan(adm.chats[0], "testUser", msg)
 	assert.Contains(t, mockAPI.SendCalls()[0].C.(tbapi.MessageConfig).Text, "would have permanently banned [testUser]")
 }
 
@@ -213,7 +215,7 @@ func TestAdmin_reportBanChannel(t *testing.T) {
 		},
 	}
 
-	adm := admin{tbAPI: mockAPI, adminChatID: 123}
+	adm := admin{tbAPI: mockAPI, chats: []*ChatContext{{GID: "default", PrimaryChatID: 0}}, adminChatID: 123}
 
 	t.Run("channel message uses SenderChat.ID in callback data", func(t *testing.T) {
 		mockAPI.ResetCalls()
@@ -222,7 +224,7 @@ func TestAdmin_reportBanChannel(t *testing.T) {
 			SenderChat: bot.SenderChat{ID: -100999888, UserName: "spamchannel"},
 			Text:       "spam from channel",
 		}
-		adm.ReportBan("spamchannel", msg)
+		adm.ReportBan(adm.chats[0], "spamchannel", msg)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
 		sentText := mockAPI.SendCalls()[0].C.(tbapi.MessageConfig).Text
@@ -243,7 +245,7 @@ func TestAdmin_reportBanChannel(t *testing.T) {
 			SenderChat: bot.SenderChat{ID: -100999888},
 			Text:       "spam from channel",
 		}
-		adm.ReportBan("Some Channel", msg)
+		adm.ReportBan(adm.chats[0], "Some Channel", msg)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
 		sentText := mockAPI.SendCalls()[0].C.(tbapi.MessageConfig).Text
@@ -257,7 +259,7 @@ func TestAdmin_reportBanChannel(t *testing.T) {
 			From: bot.User{ID: 456, Username: "spammer"},
 			Text: "spam from user",
 		}
-		adm.ReportBan("spammer", msg)
+		adm.ReportBan(adm.chats[0], "spammer", msg)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
 		sentText := mockAPI.SendCalls()[0].C.(tbapi.MessageConfig).Text
@@ -321,7 +323,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 		adm := &admin{
 			tbAPI:       mockAPI,
 			bot:         botMock,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			locator:     locatorMock,
 			superUsers:  SuperUsers{"superuser"},
@@ -382,7 +384,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 		update := createReplyUpdate("admin", 111, "spammer", 222, "spam message text")
 
 		// test the DirectBanReport function
-		err := adm.DirectBanReport(update)
+		err := adm.DirectBanReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		verifyDirectReportResults(t, mockAPI, botMock)
@@ -398,7 +400,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 		update := createReplyUpdate("admin", 111, "spammer", 222, "spam message text")
 
 		// test the DirectSpamReport function
-		err := adm.DirectSpamReport(update)
+		err := adm.DirectSpamReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		verifyDirectReportResults(t, mockAPI, botMock)
@@ -416,7 +418,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 		update := createReplyUpdate("admin", 111, "spammer", 222, "spam message text")
 
 		// test the DirectSpamReport function in dry mode
-		err := adm.DirectSpamReport(update)
+		err := adm.DirectSpamReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		// check that admin was notified
@@ -438,7 +440,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 		update := createReplyUpdate("admin", 111, "user", 222, "inappropriate message")
 
 		// test the DirectWarnReport function
-		err := adm.DirectWarnReport(update)
+		err := adm.DirectWarnReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		// check that the API was called to delete messages
@@ -474,7 +476,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 			},
 		}
 
-		err := adm.DirectSpamReport(update)
+		err := adm.DirectSpamReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		// verify ban used BanChatSenderChatConfig with channel ID, not BanChatMemberConfig
@@ -524,7 +526,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 			},
 		}
 
-		err := adm.DirectSpamReport(update)
+		err := adm.DirectSpamReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		// should NOT use BanChatSenderChatConfig (would ban the group from itself)
@@ -554,7 +556,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 			},
 		}
 
-		err := adm.DirectWarnReport(update)
+		err := adm.DirectWarnReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
@@ -583,7 +585,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 			},
 		}
 
-		err := adm.DirectWarnReport(update)
+		err := adm.DirectWarnReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
@@ -614,7 +616,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 			},
 		}
 
-		err := adm.DirectSpamReport(update)
+		err := adm.DirectSpamReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		require.Len(t, mockAPI.SendCalls(), 1)
@@ -634,7 +636,7 @@ func TestAdmin_DirectCommands(t *testing.T) {
 		update := createReplyUpdate("admin", 111, "superuser", 222, "inappropriate message")
 
 		// test the DirectWarnReport function with superuser
-		err := adm.DirectWarnReport(update)
+		err := adm.DirectWarnReport(adm.chats[0], update)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "warn message is from super-user")
 
@@ -667,7 +669,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 		}
 		adm := &admin{
 			tbAPI:         mockAPI,
-			primChatID:    123,
+			chats:         []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID:   456,
 			superUsers:    SuperUsers{"superuser"},
 			warnMsg:       "please follow our rules",
@@ -733,7 +735,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 		mockAPI, warningsMock, adm := setupTest()
 		adm.warnThreshold = 0
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		// no calls to warnings storage
@@ -749,7 +751,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 		mockAPI, warningsMock, adm := setupTest()
 		adm.warnThreshold = -1
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		assert.Empty(t, warningsMock.AddCalls())
@@ -762,7 +764,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 		mockAPI, _, adm := setupTest()
 		adm.warnings = nil
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		require.Len(t, mockAPI.SendCalls(), 1) // only warn message
@@ -775,7 +777,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 1, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		require.Len(t, warningsMock.AddCalls(), 1)
@@ -797,7 +799,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		require.Len(t, warningsMock.AddCalls(), 1)
@@ -824,7 +826,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 5, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, countMemberBans(mockAPI))
@@ -836,7 +838,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createChannelReplyUpdate(-100999888, "spam_channel"))
+		err := adm.DirectWarnReport(adm.chats[0], createChannelReplyUpdate(-100999888, "spam_channel"))
 		require.NoError(t, err)
 
 		// warning recorded under channel ID, not the Channel_Bot user
@@ -865,7 +867,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		assert.Equal(t, 0, countMemberBans(mockAPI), "dry mode must not issue ban")
@@ -887,7 +889,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		assert.Equal(t, 0, countMemberBans(mockAPI), "training mode must not issue ban")
@@ -909,7 +911,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		// soft-ban uses RestrictChatMemberConfig, not BanChatMemberConfig
@@ -938,7 +940,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return fmt.Errorf("boom")
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		require.Len(t, warningsMock.AddCalls(), 1)
@@ -955,7 +957,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 0, fmt.Errorf("boom")
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		require.Len(t, warningsMock.CountWithinCalls(), 1)
@@ -970,7 +972,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, countMemberBans(mockAPI))
@@ -980,7 +982,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 	})
 
 	t.Run("anonymous admin post (SenderChat == primChat) skips auto-ban", func(t *testing.T) {
-		// when admins post "as the group" itself, msg.SenderChat.ID equals primChatID.
+		// when admins post "as the group" itself, msg.SenderChat.ID equals the primary chat id.
 		// the auto-ban path must not record a warn keyed under the group id, nor try
 		// to ban the group itself; otherwise BanChatSenderChatConfig would target the chat.
 		mockAPI, warningsMock, adm := setupTest()
@@ -996,13 +998,13 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 				ReplyToMessage: &tbapi.Message{
 					MessageID:  999,
 					From:       &tbapi.User{UserName: "GroupAnonymousBot", ID: 1087968824},
-					SenderChat: &tbapi.Chat{ID: 123, Title: "primary group"}, // == primChatID
+					SenderChat: &tbapi.Chat{ID: 123, Title: "primary group"}, // == primary chat id
 					Text:       "post by anonymous admin",
 				},
 			},
 		}
 
-		err := adm.DirectWarnReport(update)
+		err := adm.DirectWarnReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		assert.Empty(t, warningsMock.AddCalls(), "anonymous admin posts must not record a warn")
@@ -1018,7 +1020,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createChannelReplyUpdate(-100999888, "spam_channel"))
+		err := adm.DirectWarnReport(adm.chats[0], createChannelReplyUpdate(-100999888, "spam_channel"))
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, countChannelBans(mockAPI), "channel target must use BanChatSenderChatConfig even in soft-ban mode")
@@ -1047,7 +1049,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("", 222))
 		require.NoError(t, err)
 
 		var adminMsgs []tbapi.MessageConfig
@@ -1074,7 +1076,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to auto-ban")
 	})
@@ -1091,7 +1093,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			return 2, nil
 		}
 
-		err := adm.DirectWarnReport(createReplyUpdate("user", 222))
+		err := adm.DirectWarnReport(adm.chats[0], createReplyUpdate("user", 222))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to send warn auto-ban notification")
 		// the ban itself still happened
@@ -1117,7 +1119,7 @@ func TestAdmin_DirectWarnReport_AutoBan(t *testing.T) {
 			},
 		}
 
-		err := adm.DirectWarnReport(update)
+		err := adm.DirectWarnReport(adm.chats[0], update)
 		require.NoError(t, err)
 
 		assert.Empty(t, warningsMock.AddCalls(), "must not record warn for missing identity")
@@ -1166,7 +1168,7 @@ func TestAdmin_InlineCallbacks(t *testing.T) {
 		adm := &admin{
 			tbAPI:        mockAPI,
 			bot:          botMock,
-			primChatID:   123,
+			chats:        []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID:  456,
 			locator:      locatorMock,
 			trainingMode: trainingMode,
@@ -1196,7 +1198,7 @@ func TestAdmin_InlineCallbacks(t *testing.T) {
 		mockAPI, botMock, adm, query := setupCallback(false, false)
 
 		// test the callback handler
-		err := adm.callbackBanConfirmed(query)
+		err := adm.callbackBanConfirmed(adm.chats[0], query)
 		require.NoError(t, err)
 
 		// check that edit message was called with updated text
@@ -1216,7 +1218,7 @@ func TestAdmin_InlineCallbacks(t *testing.T) {
 		mockAPI, _, adm, query := setupCallback(true, false)
 
 		// test the callback handler in training mode
-		err := adm.callbackBanConfirmed(query)
+		err := adm.callbackBanConfirmed(adm.chats[0], query)
 		require.NoError(t, err)
 
 		// in training mode, deleteAndBan should be called
@@ -1232,7 +1234,7 @@ func TestAdmin_InlineCallbacks(t *testing.T) {
 		mockAPI, botMock, adm, query := setupCallback(false, true)
 
 		// test the callback handler in soft ban mode
-		err := adm.callbackBanConfirmed(query)
+		err := adm.callbackBanConfirmed(adm.chats[0], query)
 		require.NoError(t, err)
 
 		// in soft ban mode, a real ban should be performed
@@ -1280,7 +1282,7 @@ func TestAdmin_InlineCallbacks(t *testing.T) {
 			From: &tbapi.User{UserName: "admin", ID: 111},
 		}
 
-		err := adm.callbackUnbanConfirmed(query)
+		err := adm.callbackUnbanConfirmed(adm.chats[0], query)
 		require.NoError(t, err)
 
 		// verify UnbanChatSenderChatConfig was used (not UnbanChatMemberConfig)
@@ -1322,7 +1324,7 @@ func TestAdmin_InlineCallbacks(t *testing.T) {
 			From: &tbapi.User{UserName: "admin", ID: 111},
 		}
 
-		err := adm.callbackUnbanConfirmed(query)
+		err := adm.callbackUnbanConfirmed(adm.chats[0], query)
 		require.NoError(t, err)
 
 		// verify UnbanChatSenderChatConfig was used
@@ -1358,7 +1360,7 @@ func TestAdmin_InlineCallbacks(t *testing.T) {
 			From: &tbapi.User{UserName: "admin", ID: 111},
 		}
 
-		err := adm.callbackBanConfirmed(query)
+		err := adm.callbackBanConfirmed(adm.chats[0], query)
 		require.NoError(t, err)
 
 		// in soft ban mode with channel, should use BanChatSenderChatConfig
@@ -1416,6 +1418,7 @@ func TestAdmin_CallbackShowInfo_PreservesUserLinks(t *testing.T) {
 	// set up the admin object
 	adm := &admin{
 		tbAPI:       mockAPI,
+		chats:       []*ChatContext{{GID: "default", PrimaryChatID: 0}},
 		adminChatID: 456,
 	}
 
@@ -1453,7 +1456,7 @@ func TestAdmin_CallbackShowInfo_PreservesUserLinks(t *testing.T) {
 		}
 
 		// run the function that needs to maintain the links
-		err := adm.callbackShowInfo(query)
+		err := adm.callbackShowInfo(adm.chats[0], query)
 		require.NoError(t, err)
 
 		// with the fix, markdown should succeed on first attempt because underscore is escaped
@@ -1479,6 +1482,7 @@ func TestAdmin_CallbackShowInfo_PreservesUserLinks(t *testing.T) {
 
 		adm := admin{
 			tbAPI:       mockAPI,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 0}},
 			adminChatID: 123,
 		}
 
@@ -1504,7 +1508,7 @@ func TestAdmin_CallbackShowInfo_PreservesUserLinks(t *testing.T) {
 			},
 		}
 
-		err := adm.callbackShowInfo(query)
+		err := adm.callbackShowInfo(adm.chats[0], query)
 		require.NoError(t, err)
 		assert.Equal(t, 1, sendAttempts, "Should succeed on first attempt with markdown")
 	})
@@ -1529,6 +1533,7 @@ func TestAdmin_CallbackShowInfo_PreservesUserLinks(t *testing.T) {
 
 		adm := admin{
 			tbAPI:       mockAPI,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 0}},
 			adminChatID: 123,
 		}
 
@@ -1554,7 +1559,7 @@ func TestAdmin_CallbackShowInfo_PreservesUserLinks(t *testing.T) {
 			},
 		}
 
-		err := adm.callbackShowInfo(query)
+		err := adm.callbackShowInfo(adm.chats[0], query)
 		require.NoError(t, err)
 		// with the fix, markdown should succeed on first attempt
 		assert.Equal(t, 1, sendAttempts, "Should succeed on first attempt with markdown")
@@ -1657,10 +1662,10 @@ func TestAdmin_MsgHandlerWithEmptyText(t *testing.T) {
 	}
 
 	adminHandler := admin{
-		tbAPI:      mockAPI,
-		bot:        botMock,
-		locator:    locatorMock,
-		primChatID: 123,
+		tbAPI:   mockAPI,
+		bot:     botMock,
+		locator: locatorMock,
+		chats:   []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 	}
 
 	for _, tt := range tests {
@@ -1699,7 +1704,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 			tbAPI:       mockAPI,
 			bot:         botMock,
 			locator:     locatorMock,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 		}
 
@@ -1758,7 +1763,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 			tbAPI:       mockAPI,
 			bot:         botMock,
 			locator:     locatorMock,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{"superuser"},
 		}
@@ -1830,7 +1835,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 			tbAPI:       mockAPI,
 			bot:         botMock,
 			locator:     locatorMock,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{"superuser"},
 		}
@@ -1897,7 +1902,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 
 		adm := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456, superUsers: SuperUsers{"superuser"},
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456, superUsers: SuperUsers{"superuser"},
 		}
 
 		msg := &tbapi.Message{
@@ -1961,7 +1966,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 
 		adm := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456, superUsers: SuperUsers{"superuser"},
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456, superUsers: SuperUsers{"superuser"},
 		}
 
 		msg := &tbapi.Message{
@@ -2002,7 +2007,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 			tbAPI:       mockAPI,
 			bot:         botMock,
 			locator:     locatorMock,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 		}
 
@@ -2061,7 +2066,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 			tbAPI:       mockAPI,
 			bot:         botMock,
 			locator:     locatorMock,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{"superuser"},
 			dry:         true, // enable dry mode
@@ -2135,7 +2140,7 @@ func TestAdmin_MsgHandler(t *testing.T) {
 			tbAPI:       mockAPI,
 			bot:         botMock,
 			locator:     locatorMock,
-			primChatID:  123,
+			chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID: 456,
 			superUsers:  SuperUsers{"superuser"},
 		}
@@ -2204,7 +2209,7 @@ func TestAdmin_MsgHandlerFallback(t *testing.T) {
 
 		adminHandler := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456, superUsers: SuperUsers{"superuser"},
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456, superUsers: SuperUsers{"superuser"},
 		}
 
 		msg := &tbapi.Message{
@@ -2249,7 +2254,7 @@ func TestAdmin_MsgHandlerFallback(t *testing.T) {
 
 		adminHandler := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456,
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456,
 		}
 
 		msg := &tbapi.Message{
@@ -2281,7 +2286,7 @@ func TestAdmin_MsgHandlerFallback(t *testing.T) {
 
 		adminHandler := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456,
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456,
 		}
 
 		// channel forward - ForwardOrigin exists but no SenderUser, so getForwardUsernameAndID returns 0
@@ -2326,7 +2331,7 @@ func TestAdmin_MsgHandlerFallback(t *testing.T) {
 
 		adminHandler := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456, dry: true,
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456, dry: true,
 		}
 
 		msg := &tbapi.Message{
@@ -2380,7 +2385,7 @@ func TestAdmin_MsgHandlerFallback(t *testing.T) {
 
 		adminHandler := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456, trainingMode: true,
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456, trainingMode: true,
 		}
 
 		msg := &tbapi.Message{
@@ -2413,7 +2418,7 @@ func TestAdmin_MsgHandlerFallback(t *testing.T) {
 
 		adminHandler := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456, superUsers: SuperUsers{"superuser"},
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456, superUsers: SuperUsers{"superuser"},
 		}
 
 		msg := &tbapi.Message{
@@ -2446,7 +2451,7 @@ func TestAdmin_MsgHandlerFallback(t *testing.T) {
 
 		adminHandler := admin{
 			tbAPI: mockAPI, bot: botMock, locator: locatorMock,
-			primChatID: 123, adminChatID: 456, superUsers: SuperUsers{"555"},
+			chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456, superUsers: SuperUsers{"555"},
 		}
 
 		msg := &tbapi.Message{
@@ -2503,7 +2508,7 @@ func TestAdmin_DirectSpamReport_ImageOnly(t *testing.T) {
 	adm := &admin{
 		tbAPI:       mockAPI,
 		bot:         botMock,
-		primChatID:  123,
+		chats:       []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 		adminChatID: 456,
 		locator:     locatorMock,
 		superUsers:  SuperUsers{},
@@ -2524,7 +2529,7 @@ func TestAdmin_DirectSpamReport_ImageOnly(t *testing.T) {
 		},
 	}
 
-	err := adm.directReport(update, true)
+	err := adm.directReport(adm.chats[0], update, true)
 	require.NoError(t, err, "Should handle image-only spam without error")
 
 	assert.Len(t, botMock.RemoveApprovedUserCalls(), 1, "Should remove user from approved list")
@@ -2551,7 +2556,7 @@ func TestAdmin_DirectSpamReport_QuoteHandling(t *testing.T) {
 			UpdateSpamFunc: func(msg string) error { return nil },
 		}
 		adm := &admin{
-			tbAPI: mockAPI, bot: botMock, primChatID: 123, adminChatID: 456,
+			tbAPI: mockAPI, bot: botMock, chats: []*ChatContext{{GID: "default", PrimaryChatID: 123}}, adminChatID: 456,
 			locator: &mocks.LocatorMock{}, superUsers: SuperUsers{},
 		}
 		return mockAPI, botMock, adm
@@ -2570,7 +2575,7 @@ func TestAdmin_DirectSpamReport_QuoteHandling(t *testing.T) {
 				},
 			},
 		}
-		err := adm.directReport(update, true)
+		err := adm.directReport(adm.chats[0], update, true)
 		require.NoError(t, err)
 		require.Len(t, botMock.UpdateSpamCalls(), 1)
 		assert.Equal(t, "Thank you\nBuy cheap stuff at spam.com", botMock.UpdateSpamCalls()[0].Msg)
@@ -2591,7 +2596,7 @@ func TestAdmin_DirectSpamReport_QuoteHandling(t *testing.T) {
 				},
 			},
 		}
-		err := adm.directReport(update, true)
+		err := adm.directReport(adm.chats[0], update, true)
 		require.NoError(t, err)
 		require.Len(t, botMock.UpdateSpamCalls(), 1)
 		assert.Equal(t, "some text", botMock.UpdateSpamCalls()[0].Msg)
@@ -2609,7 +2614,7 @@ func TestAdmin_DirectSpamReport_QuoteHandling(t *testing.T) {
 				},
 			},
 		}
-		err := adm.directReport(update, true)
+		err := adm.directReport(adm.chats[0], update, true)
 		require.NoError(t, err)
 		require.Len(t, botMock.UpdateSpamCalls(), 1)
 		assert.Equal(t, "plain spam text", botMock.UpdateSpamCalls()[0].Msg)
@@ -2630,7 +2635,7 @@ func TestAdmin_DirectSpamReport_QuoteHandling(t *testing.T) {
 				},
 			},
 		}
-		err := adm.directReport(update, true)
+		err := adm.directReport(adm.chats[0], update, true)
 		require.NoError(t, err)
 		require.Len(t, botMock.UpdateSpamCalls(), 1)
 		assert.Equal(t, "image caption\nquoted spam content", botMock.UpdateSpamCalls()[0].Msg)
@@ -2676,7 +2681,7 @@ func TestAdmin_DirectReportWithAggressiveCleanup(t *testing.T) {
 		adm := &admin{
 			tbAPI:                  mockAPI,
 			bot:                    botMock,
-			primChatID:             123,
+			chats:                  []*ChatContext{{GID: "default", PrimaryChatID: 123}},
 			adminChatID:            456,
 			locator:                locatorMock,
 			superUsers:             SuperUsers{},
@@ -2709,7 +2714,7 @@ func TestAdmin_DirectReportWithAggressiveCleanup(t *testing.T) {
 		mockAPI, locatorMock, adm := setupAggressiveCleanupTest(true, false, []int{100, 101, 102})
 		update := createSpamReportUpdate()
 
-		err := adm.directReport(update, true)
+		err := adm.directReport(adm.chats[0], update, true)
 		require.NoError(t, err)
 
 		// wait for async cleanup goroutine to complete
@@ -2751,7 +2756,7 @@ func TestAdmin_DirectReportWithAggressiveCleanup(t *testing.T) {
 		mockAPI, locatorMock, adm := setupAggressiveCleanupTest(false, false, []int{})
 		update := createSpamReportUpdate()
 
-		err := adm.directReport(update, true)
+		err := adm.directReport(adm.chats[0], update, true)
 		require.NoError(t, err)
 
 		// verify GetUserMessageIDs was NOT called
@@ -2772,7 +2777,7 @@ func TestAdmin_DirectReportWithAggressiveCleanup(t *testing.T) {
 		_, locatorMock, adm := setupAggressiveCleanupTest(true, true, []int{})
 		update := createSpamReportUpdate()
 
-		err := adm.directReport(update, false)
+		err := adm.directReport(adm.chats[0], update, false)
 		require.NoError(t, err)
 
 		// verify GetUserMessageIDs was NOT called in dry mode
@@ -2800,11 +2805,11 @@ func TestAdmin_DeleteUserMessages(t *testing.T) {
 		adm := &admin{
 			tbAPI:                  mockAPI,
 			locator:                locatorMock,
-			primChatID:             123456789,
+			chats:                  []*ChatContext{{GID: "default", PrimaryChatID: 123456789}},
 			aggressiveCleanupLimit: 100,
 		}
 
-		deleted, err := adm.deleteUserMessages(666)
+		deleted, err := adm.deleteUserMessages(adm.chats[0], 666)
 		require.NoError(t, err)
 		assert.Equal(t, 3, deleted)
 
@@ -2828,10 +2833,11 @@ func TestAdmin_DeleteUserMessages(t *testing.T) {
 
 		adm := &admin{
 			locator:                locatorMock,
+			chats:                  []*ChatContext{{GID: "default", PrimaryChatID: 0}},
 			aggressiveCleanupLimit: 100,
 		}
 
-		deleted, err := adm.deleteUserMessages(666)
+		deleted, err := adm.deleteUserMessages(adm.chats[0], 666)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to get user messages")
 		assert.Equal(t, 0, deleted)
@@ -2859,11 +2865,11 @@ func TestAdmin_DeleteUserMessages(t *testing.T) {
 		adm := &admin{
 			tbAPI:                  mockAPI,
 			locator:                locatorMock,
-			primChatID:             123456789,
+			chats:                  []*ChatContext{{GID: "default", PrimaryChatID: 123456789}},
 			aggressiveCleanupLimit: 100,
 		}
 
-		deleted, err := adm.deleteUserMessages(666)
+		deleted, err := adm.deleteUserMessages(adm.chats[0], 666)
 		require.NoError(t, err)
 		assert.Equal(t, 2, deleted) // only 2 successful deletions
 
@@ -2889,11 +2895,11 @@ func TestAdmin_DeleteUserMessages(t *testing.T) {
 		adm := &admin{
 			tbAPI:                  mockAPI,
 			locator:                locatorMock,
-			primChatID:             123456789,
+			chats:                  []*ChatContext{{GID: "default", PrimaryChatID: 123456789}},
 			aggressiveCleanupLimit: 100,
 		}
 
-		deleted, err := adm.deleteUserMessages(666)
+		deleted, err := adm.deleteUserMessages(adm.chats[0], 666)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "stopped after 5 consecutive failures")
 		assert.Equal(t, 0, deleted)
@@ -2909,10 +2915,11 @@ func TestAdmin_DeleteUserMessages(t *testing.T) {
 
 		adm := &admin{
 			locator:                locatorMock,
+			chats:                  []*ChatContext{{GID: "default", PrimaryChatID: 0}},
 			aggressiveCleanupLimit: 100,
 		}
 
-		deleted, err := adm.deleteUserMessages(666)
+		deleted, err := adm.deleteUserMessages(adm.chats[0], 666)
 		require.NoError(t, err)
 		assert.Equal(t, 0, deleted)
 	})

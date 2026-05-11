@@ -31,7 +31,8 @@ type admin struct {
 	bot                    Bot
 	locator                Locator
 	superUsers             SuperUsers
-	primChatID             int64
+	chats                  []*ChatContext          // primary group chats, also keyed in byGID
+	byGID                  map[string]*ChatContext // gid → chat lookup; nil when admin runs in legacy fallback
 	adminChatID            int64
 	trainingMode           bool
 	softBan                bool // if true, the user not banned automatically, but only restricted
@@ -44,6 +45,17 @@ type admin struct {
 	warnWindow             time.Duration // sliding window for counting warns
 }
 
+// defaultChat returns the first configured chat or nil if none are configured.
+// used as a fallback for callback handlers until callback data carries an
+// explicit gid and as the route for admin-chat forwards that lack per-message
+// origin information.
+func (a *admin) defaultChat() *ChatContext {
+	if len(a.chats) == 0 {
+		return nil
+	}
+	return a.chats[0]
+}
+
 const (
 	confirmationPrefix = "?"
 	banPrefix          = "+"
@@ -51,7 +63,7 @@ const (
 )
 
 // ReportBan a ban message to admin chat with a button to unban the user
-func (a *admin) ReportBan(banUserStr string, msg *bot.Message) {
+func (a *admin) ReportBan(_ *ChatContext, banUserStr string, msg *bot.Message) {
 	log.Printf("[DEBUG] report to admin chat, ban msgsData for %s, group: %d", banUserStr, a.adminChatID)
 	msgText := msg.Text
 	if msg.Quote != "" {
@@ -95,6 +107,11 @@ func (a *admin) ReportBan(banUserStr string, msg *bot.Message) {
 // a degraded fallback path is used: the user is banned and spam samples updated,
 // but the original message cannot be deleted automatically.
 func (a *admin) MsgHandler(update tbapi.Update) error {
+	c := a.defaultChat()
+	if c == nil {
+		log.Printf("[WARN] MsgHandler called without configured chat, dropping update %d", update.UpdateID)
+		return nil
+	}
 	shrink := func(inp string, maxLen int) string {
 		if utf8.RuneCountInString(inp) <= maxLen {
 			return inp
@@ -135,7 +152,7 @@ func (a *admin) MsgHandler(update tbapi.Update) error {
 	if !ok {
 		// locator lookup failed; if ForwardOrigin provides a user ID, use degraded fallback path
 		if fwdID != 0 {
-			return a.msgHandlerFallback(update, fwdID, username, msgTxt)
+			return a.msgHandlerFallback(c, update, fwdID, username, msgTxt)
 		}
 		return fmt.Errorf("not found %q in locator", shrink(msgTxt, 50))
 	}
@@ -187,7 +204,7 @@ func (a *admin) MsgHandler(update tbapi.Update) error {
 	_, err := a.tbAPI.Request(tbapi.DeleteMessageConfig{
 		BaseChatMessage: tbapi.BaseChatMessage{
 			MessageID:  info.MsgID,
-			ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID},
+			ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 		},
 	})
 	if err != nil {
@@ -198,12 +215,12 @@ func (a *admin) MsgHandler(update tbapi.Update) error {
 
 	// skip ban for anonymous admin posts - the locator may store them with the group's own chat ID,
 	// and banning that would attempt to ban the group from posting in itself
-	if info.UserID == a.primChatID {
-		log.Printf("[WARN] skipping ban in MsgHandler, user ID %d matches group chat", a.primChatID)
+	if info.UserID == c.PrimaryChatID {
+		log.Printf("[WARN] skipping ban in MsgHandler, user ID %d matches group chat", c.PrimaryChatID)
 	} else {
 		banReq := banRequest{duration: bot.PermanentBanDuration, userID: info.UserID,
 			channelID: channelIDFromCallback(info.UserID),
-			chatID:    a.primChatID, tbAPI: a.tbAPI, dry: a.dry, training: a.trainingMode, userName: username}
+			chatID:    c.PrimaryChatID, tbAPI: a.tbAPI, dry: a.dry, training: a.trainingMode, userName: username}
 		if err := banUserOrChannel(banReq); err != nil {
 			errs = multierror.Append(errs, fmt.Errorf("failed to ban user %d: %w", info.UserID, err))
 		}
@@ -219,7 +236,7 @@ func (a *admin) MsgHandler(update tbapi.Update) error {
 // but ForwardOrigin provides the original sender's user ID. performs all possible actions
 // (ban, spam update, remove from approved) and warns the admin that the original message
 // must be deleted manually since we don't have the message ID from the primary chat.
-func (a *admin) msgHandlerFallback(update tbapi.Update, fwdID int64, username, msgTxt string) error {
+func (a *admin) msgHandlerFallback(c *ChatContext, update tbapi.Update, fwdID int64, username, msgTxt string) error {
 	log.Printf("[INFO] locator fallback: forwarded user %q (%d), processing without locator data", username, fwdID)
 	errs := new(multierror.Error)
 
@@ -270,7 +287,7 @@ func (a *admin) msgHandlerFallback(update tbapi.Update, fwdID int64, username, m
 	}
 
 	// ban user (no message deletion - we don't have the message ID from primary chat)
-	banReq := banRequest{duration: bot.PermanentBanDuration, userID: fwdID, chatID: a.primChatID,
+	banReq := banRequest{duration: bot.PermanentBanDuration, userID: fwdID, chatID: c.PrimaryChatID,
 		tbAPI: a.tbAPI, dry: a.dry, training: a.trainingMode, userName: username}
 	if err := banUserOrChannel(banReq); err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to ban user %d: %w", fwdID, err))
@@ -294,20 +311,38 @@ func (a *admin) msgHandlerFallback(update tbapi.Update, fwdID int64, username, m
 }
 
 // DirectSpamReport handles messages replayed with "/spam" or "spam" by admin
-func (a *admin) DirectSpamReport(update tbapi.Update) error {
-	return a.directReport(update, true)
+func (a *admin) DirectSpamReport(c *ChatContext, update tbapi.Update) error {
+	if c == nil {
+		c = a.defaultChat()
+	}
+	if c == nil {
+		return fmt.Errorf("no chat configured for direct spam report")
+	}
+	return a.directReport(c, update, true)
 }
 
 // DirectBanReport handles messages replayed with "/ban" or "ban" by admin. doing all the same as DirectSpamReport
 // but without updating spam samples
-func (a *admin) DirectBanReport(update tbapi.Update) error {
-	return a.directReport(update, false)
+func (a *admin) DirectBanReport(c *ChatContext, update tbapi.Update) error {
+	if c == nil {
+		c = a.defaultChat()
+	}
+	if c == nil {
+		return fmt.Errorf("no chat configured for direct ban report")
+	}
+	return a.directReport(c, update, false)
 }
 
 // DirectWarnReport handles messages replied with "/warn" or "warn" by admin.
 // it removes the original message and posts a warning to the main chat.
 // for channel messages, the warning targets the channel name instead of the shared Channel_Bot user.
-func (a *admin) DirectWarnReport(update tbapi.Update) error {
+func (a *admin) DirectWarnReport(c *ChatContext, update tbapi.Update) error {
+	if c == nil {
+		c = a.defaultChat()
+	}
+	if c == nil {
+		return fmt.Errorf("no chat configured for direct warn report")
+	}
 	warnLogFrom := update.Message.ReplyToMessage.From.UserName
 	warnLogID := update.Message.ReplyToMessage.From.ID
 	if sc := update.Message.ReplyToMessage.SenderChat; sc != nil && sc.ID != 0 {
@@ -334,7 +369,7 @@ func (a *admin) DirectWarnReport(update tbapi.Update) error {
 	// delete original message
 	_, err := a.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 		MessageID:  origMsg.MessageID,
-		ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID},
+		ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 	}})
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", origMsg.MessageID, err))
@@ -345,7 +380,7 @@ func (a *admin) DirectWarnReport(update tbapi.Update) error {
 	// delete reply message
 	_, err = a.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 		MessageID:  update.Message.MessageID,
-		ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID},
+		ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 	}})
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", update.Message.MessageID, err))
@@ -355,7 +390,7 @@ func (a *admin) DirectWarnReport(update tbapi.Update) error {
 
 	// make a warning message and replay to origMsg.MessageID
 	warnTargetName := "@" + origMsg.From.UserName
-	if origMsg.SenderChat != nil && origMsg.SenderChat.ID != 0 && origMsg.SenderChat.ID != a.primChatID {
+	if origMsg.SenderChat != nil && origMsg.SenderChat.ID != 0 && origMsg.SenderChat.ID != c.PrimaryChatID {
 		chName := a.channelDisplayName(origMsg.SenderChat)
 		if origMsg.SenderChat.UserName != "" {
 			warnTargetName = "@" + chName
@@ -365,11 +400,11 @@ func (a *admin) DirectWarnReport(update tbapi.Update) error {
 	}
 	warnMsg := fmt.Sprintf("warning from %s\n\n%s %s", update.Message.From.UserName,
 		warnTargetName, a.warnMsg)
-	if err := send(tbapi.NewMessage(a.primChatID, escapeMarkDownV1Text(warnMsg)), a.tbAPI); err != nil {
+	if err := send(tbapi.NewMessage(c.PrimaryChatID, escapeMarkDownV1Text(warnMsg)), a.tbAPI); err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to send warning to main chat: %w", err))
 	}
 
-	if banErr := a.trackWarnAndMaybeBan(origMsg); banErr != nil {
+	if banErr := a.trackWarnAndMaybeBan(c, origMsg); banErr != nil {
 		errs = multierror.Append(errs, banErr)
 	}
 
@@ -391,12 +426,12 @@ type warnTarget struct {
 // returns (target, true) for plain users and channel posts; (target, false) for
 // anonymous admin posts (SenderChat == group itself, From is shared GroupAnonymousBot)
 // and updates with no resolvable identity.
-func (a *admin) resolveWarnTarget(origMsg *tbapi.Message) (warnTarget, bool) {
+func (a *admin) resolveWarnTarget(c *ChatContext, origMsg *tbapi.Message) (warnTarget, bool) {
 	if origMsg.SenderChat != nil && origMsg.SenderChat.ID != 0 {
-		// anonymous admin posts have SenderChat.ID == primChatID; From identity is the
+		// anonymous admin posts have SenderChat.ID == primary chat ID; From identity is the
 		// shared GroupAnonymousBot user. tracking warns against either is meaningless
 		// (banning the group itself or a shared bot id), so skip entirely.
-		if origMsg.SenderChat.ID == a.primChatID {
+		if origMsg.SenderChat.ID == c.PrimaryChatID {
 			return warnTarget{}, false
 		}
 		return warnTarget{
@@ -417,11 +452,11 @@ func (a *admin) resolveWarnTarget(origMsg *tbapi.Message) (warnTarget, bool) {
 // target cannot be resolved (anonymous admin posts, missing From/SenderChat).
 // returns nil unless the ban itself fails - storage failures are logged but not propagated
 // because the warning message has already been posted (best-effort).
-func (a *admin) trackWarnAndMaybeBan(origMsg *tbapi.Message) error {
+func (a *admin) trackWarnAndMaybeBan(c *ChatContext, origMsg *tbapi.Message) error {
 	if a.warnThreshold <= 0 || a.warnings == nil {
 		return nil
 	}
-	target, ok := a.resolveWarnTarget(origMsg)
+	target, ok := a.resolveWarnTarget(c, origMsg)
 	if !ok {
 		return nil
 	}
@@ -438,13 +473,13 @@ func (a *admin) trackWarnAndMaybeBan(origMsg *tbapi.Message) error {
 	if count < a.warnThreshold {
 		return nil
 	}
-	return a.executeWarnBan(target, count)
+	return a.executeWarnBan(c, target, count)
 }
 
 // executeWarnBan bans a user or channel after the warn-threshold is reached within warnWindow.
 // it respects dry, training, and softBan modes, and posts an admin-chat notification.
 // it does not update spam samples - a warn is not necessarily spam content.
-func (a *admin) executeWarnBan(target warnTarget, count int) error {
+func (a *admin) executeWarnBan(c *ChatContext, target warnTarget, count int) error {
 	log.Printf("[INFO] warn auto-ban triggered for %q (%d): %d warns within %v",
 		target.userName, target.userID, count, a.warnWindow)
 
@@ -452,7 +487,7 @@ func (a *admin) executeWarnBan(target warnTarget, count int) error {
 		duration:  bot.PermanentBanDuration,
 		userID:    target.userID,
 		channelID: target.channelID,
-		chatID:    a.primChatID,
+		chatID:    c.PrimaryChatID,
 		tbAPI:     a.tbAPI,
 		dry:       a.dry,
 		training:  a.trainingMode,
@@ -520,7 +555,7 @@ func (a *admin) channelDisplayName(ch *tbapi.Chat) string {
 }
 
 // deleteUserMessages deletes all recent messages from a user with rate limiting
-func (a *admin) deleteUserMessages(userID int64) (deleted int, err error) {
+func (a *admin) deleteUserMessages(c *ChatContext, userID int64) (deleted int, err error) {
 	ctx := context.Background()
 	msgIDs, err := a.locator.GetUserMessageIDs(ctx, userID, a.aggressiveCleanupLimit)
 	if err != nil {
@@ -546,7 +581,7 @@ func (a *admin) deleteUserMessages(userID int64) (deleted int, err error) {
 		_, err := a.tbAPI.Request(tbapi.DeleteMessageConfig{
 			BaseChatMessage: tbapi.BaseChatMessage{
 				MessageID:  msgID,
-				ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID},
+				ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 			},
 		})
 		if err == nil {
@@ -566,7 +601,7 @@ func (a *admin) deleteUserMessages(userID int64) (deleted int, err error) {
 }
 
 // directReport handles messages replayed with "/spam" or "spam", or "/ban" or "ban" by admin
-func (a *admin) directReport(update tbapi.Update, updateSamples bool) error {
+func (a *admin) directReport(c *ChatContext, update tbapi.Update, updateSamples bool) error {
 	logFrom := update.Message.ReplyToMessage.From.UserName
 	logID := update.Message.ReplyToMessage.From.ID
 	if sc := update.Message.ReplyToMessage.SenderChat; sc != nil && sc.ID != 0 {
@@ -601,7 +636,7 @@ func (a *admin) directReport(update tbapi.Update, updateSamples bool) error {
 	// detect channel message and set channel ID early, needed for approval removal and diagnostics.
 	// skip when SenderChat.ID equals the group's own chat ID (anonymous admin post)
 	var channelID int64
-	if origMsg.SenderChat != nil && origMsg.SenderChat.ID != 0 && origMsg.SenderChat.ID != a.primChatID {
+	if origMsg.SenderChat != nil && origMsg.SenderChat.ID != 0 && origMsg.SenderChat.ID != c.PrimaryChatID {
 		channelID = origMsg.SenderChat.ID
 	}
 
@@ -664,7 +699,7 @@ func (a *admin) directReport(update tbapi.Update, updateSamples bool) error {
 	// delete original message
 	_, err := a.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 		MessageID:  origMsg.MessageID,
-		ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID},
+		ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 	}})
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", origMsg.MessageID, err))
@@ -675,7 +710,7 @@ func (a *admin) directReport(update tbapi.Update, updateSamples bool) error {
 	// delete reply message
 	_, err = a.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 		MessageID:  update.Message.MessageID,
-		ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID},
+		ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 	}})
 	if err != nil {
 		errs = multierror.Append(errs, fmt.Errorf("failed to delete message %d: %w", update.Message.MessageID, err))
@@ -690,12 +725,12 @@ func (a *admin) directReport(update tbapi.Update, updateSamples bool) error {
 
 	// skip ban and cleanup for anonymous admin posts - banning the shared system bot user
 	// (GroupAnonymousBot) would affect all anonymous admin messages in the group
-	if origMsg.SenderChat != nil && origMsg.SenderChat.ID == a.primChatID {
-		log.Printf("[WARN] skipping ban for anonymous admin post, sender chat %d matches group chat", a.primChatID)
+	if origMsg.SenderChat != nil && origMsg.SenderChat.ID == c.PrimaryChatID {
+		log.Printf("[WARN] skipping ban for anonymous admin post, sender chat %d matches group chat", c.PrimaryChatID)
 	} else {
 		// ban user or channel
 		banReq := banRequest{duration: bot.PermanentBanDuration, userID: origMsg.From.ID, channelID: channelID,
-			chatID: a.primChatID, tbAPI: a.tbAPI, dry: a.dry, training: a.trainingMode, userName: username}
+			chatID: c.PrimaryChatID, tbAPI: a.tbAPI, dry: a.dry, training: a.trainingMode, userName: username}
 
 		if err := banUserOrChannel(banReq); err != nil {
 			errs = multierror.Append(errs, fmt.Errorf("failed to ban user %d: %w", origMsg.From.ID, err))
@@ -709,9 +744,9 @@ func (a *admin) directReport(update tbapi.Update, updateSamples bool) error {
 	if channelID != 0 {
 		cleanupUserID = channelID
 	}
-	if a.aggressiveCleanup && !a.dry && (origMsg.SenderChat == nil || origMsg.SenderChat.ID != a.primChatID) {
+	if a.aggressiveCleanup && !a.dry && (origMsg.SenderChat == nil || origMsg.SenderChat.ID != c.PrimaryChatID) {
 		go func() {
-			deleted, err := a.deleteUserMessages(cleanupUserID)
+			deleted, err := a.deleteUserMessages(c, cleanupUserID)
 			if err != nil {
 				log.Printf("[WARN] aggressive cleanup failed: %v", err)
 				return
@@ -746,9 +781,14 @@ func (a *admin) InlineCallbackHandler(query *tbapi.CallbackQuery) error {
 		return nil
 	}
 
+	c := a.defaultChat()
+	if c == nil {
+		return fmt.Errorf("no chat configured for callback handling")
+	}
+
 	// if callback msgsData starts with "?", we should show a confirmation message
 	if strings.HasPrefix(callbackData, confirmationPrefix) {
-		if err := a.callbackAskBanConfirmation(query); err != nil {
+		if err := a.callbackAskBanConfirmation(c, query); err != nil {
 			return fmt.Errorf("failed to make ban confirmation dialog: %w", err)
 		}
 		log.Printf("[DEBUG] unban confirmation request sent, chatID: %d, userID: %s, orig: %q",
@@ -758,7 +798,7 @@ func (a *admin) InlineCallbackHandler(query *tbapi.CallbackQuery) error {
 
 	// if callback msgsData starts with "+", we should not unban the user, but rather clear the keyboard and add to spam samples
 	if strings.HasPrefix(callbackData, banPrefix) {
-		if err := a.callbackBanConfirmed(query); err != nil {
+		if err := a.callbackBanConfirmed(c, query); err != nil {
 			return fmt.Errorf("failed confirmation ban: %w", err)
 		}
 		log.Printf("[DEBUG] ban confirmed, chatID: %d, userID: %s, orig: %q", chatID, callbackData, query.Message.Text)
@@ -767,7 +807,7 @@ func (a *admin) InlineCallbackHandler(query *tbapi.CallbackQuery) error {
 
 	// if callback msgsData starts with "!", we should show a spam info details
 	if strings.HasPrefix(callbackData, infoPrefix) {
-		if err := a.callbackShowInfo(query); err != nil {
+		if err := a.callbackShowInfo(c, query); err != nil {
 			return fmt.Errorf("failed to show spam info: %w", err)
 		}
 		log.Printf("[DEBUG] spam info sent, chatID: %d, userID: %s, orig: %q", chatID, callbackData, query.Message.Text)
@@ -776,7 +816,7 @@ func (a *admin) InlineCallbackHandler(query *tbapi.CallbackQuery) error {
 
 	// no prefix, callback msgsData here is userID, we should unban the user
 	log.Printf("[DEBUG] unban action activated, chatID: %d, userID: %s, orig: %q", chatID, callbackData, query.Message.Text)
-	if err := a.callbackUnbanConfirmed(query); err != nil {
+	if err := a.callbackUnbanConfirmed(c, query); err != nil {
 		return fmt.Errorf("failed to unban user: %w", err)
 	}
 	log.Printf("[INFO] user unbanned, chatID: %d, userID: %s, orig: %q", chatID, callbackData, query.Message.Text)
@@ -786,7 +826,7 @@ func (a *admin) InlineCallbackHandler(query *tbapi.CallbackQuery) error {
 
 // callbackAskBanConfirmation sends a confirmation message to admin chat with two buttons: "unban" and "keep it banned"
 // callback data: ?userID:msgID
-func (a *admin) callbackAskBanConfirmation(query *tbapi.CallbackQuery) error {
+func (a *admin) callbackAskBanConfirmation(_ *ChatContext, query *tbapi.CallbackQuery) error {
 	callbackData := query.Data
 
 	keepBanned := "Keep it banned"
@@ -812,7 +852,7 @@ func (a *admin) callbackAskBanConfirmation(query *tbapi.CallbackQuery) error {
 // it clears the keyboard and updates the message text with confirmation of ban kept in place.
 // it also updates spam samples with the original message
 // callback data: +userID:msgID
-func (a *admin) callbackBanConfirmed(query *tbapi.CallbackQuery) error {
+func (a *admin) callbackBanConfirmed(c *ChatContext, query *tbapi.CallbackQuery) error {
 	// clear keyboard and update message text with confirmation
 	updText := query.Message.Text + fmt.Sprintf("\n\n_ban confirmed by %s in %v_", query.From.UserName, sinceQuery(query))
 	editMsg := tbapi.NewEditMessageText(query.Message.Chat.ID, query.Message.MessageID, updText)
@@ -838,7 +878,7 @@ func (a *admin) callbackBanConfirmed(query *tbapi.CallbackQuery) error {
 
 	if a.trainingMode {
 		// in training mode, the user is not banned automatically, here we do the real ban & delete the message
-		if err := a.deleteAndBan(query, userID, msgID); err != nil {
+		if err := a.deleteAndBan(c, query, userID, msgID); err != nil {
 			return fmt.Errorf("failed to ban user %d: %w", userID, err)
 		}
 	}
@@ -851,7 +891,7 @@ func (a *admin) callbackBanConfirmed(query *tbapi.CallbackQuery) error {
 			userName = ""
 		}
 		banReq := banRequest{duration: bot.PermanentBanDuration, userID: userID, channelID: channelIDFromCallback(userID),
-			chatID: a.primChatID, tbAPI: a.tbAPI, dry: a.dry, training: a.trainingMode, userName: userName, restrict: false}
+			chatID: c.PrimaryChatID, tbAPI: a.tbAPI, dry: a.dry, training: a.trainingMode, userName: userName, restrict: false}
 		if err := banUserOrChannel(banReq); err != nil {
 			return fmt.Errorf("failed to ban user %d: %w", userID, err)
 		}
@@ -864,7 +904,7 @@ func (a *admin) callbackBanConfirmed(query *tbapi.CallbackQuery) error {
 // it clears the keyboard and updates the message text with confirmation of unban.
 // also it unbans the user, adds it to the approved list and updates ham samples with the original message.
 // callback data: userID:msgID
-func (a *admin) callbackUnbanConfirmed(query *tbapi.CallbackQuery) error {
+func (a *admin) callbackUnbanConfirmed(c *ChatContext, query *tbapi.CallbackQuery) error {
 	callbackData := query.Data
 	chatID := query.Message.Chat.ID // this is ID of admin chat
 	log.Printf("[DEBUG] unban action activated, chatID: %d, userID: %s", chatID, callbackData)
@@ -894,11 +934,11 @@ func (a *admin) callbackUnbanConfirmed(query *tbapi.CallbackQuery) error {
 	if !a.trainingMode {
 		if userID < 0 {
 			// negative ID indicates a channel - use channel-specific unban
-			if uerr := a.unbanChannel(userID); uerr != nil {
+			if uerr := a.unbanChannel(c, userID); uerr != nil {
 				return uerr
 			}
 		} else {
-			if uerr := a.unban(userID); uerr != nil {
+			if uerr := a.unban(c, userID); uerr != nil {
 				return uerr
 			}
 		}
@@ -941,10 +981,10 @@ func (a *admin) callbackUnbanConfirmed(query *tbapi.CallbackQuery) error {
 	return nil
 }
 
-func (a *admin) unban(userID int64) error {
+func (a *admin) unban(c *ChatContext, userID int64) error {
 	if a.softBan { // soft ban, just drop restrictions
 		_, err := a.tbAPI.Request(tbapi.RestrictChatMemberConfig{
-			ChatMemberConfig: tbapi.ChatMemberConfig{UserID: userID, ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID}},
+			ChatMemberConfig: tbapi.ChatMemberConfig{UserID: userID, ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID}},
 			Permissions: &tbapi.ChatPermissions{
 				CanSendMessages:      true,
 				CanSendAudios:        true,
@@ -967,7 +1007,7 @@ func (a *admin) unban(userID int64) error {
 
 	// hard ban, unban the user for real
 	cfg := tbapi.UnbanChatMemberConfig{
-		ChatMemberConfig: tbapi.ChatMemberConfig{UserID: userID, ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID}},
+		ChatMemberConfig: tbapi.ChatMemberConfig{UserID: userID, ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID}},
 		OnlyIfBanned:     true,
 	}
 	_, err := a.tbAPI.Request(cfg)
@@ -980,9 +1020,9 @@ func (a *admin) unban(userID int64) error {
 }
 
 // unbanChannel unbans a previously banned channel (sender chat) from the group
-func (a *admin) unbanChannel(channelID int64) error {
+func (a *admin) unbanChannel(c *ChatContext, channelID int64) error {
 	_, err := a.tbAPI.Request(tbapi.UnbanChatSenderChatConfig{
-		ChatConfig:   tbapi.ChatConfig{ChatID: a.primChatID},
+		ChatConfig:   tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 		SenderChatID: channelID,
 	})
 	if err != nil {
@@ -993,7 +1033,7 @@ func (a *admin) unbanChannel(channelID int64) error {
 
 // callbackShowInfo handles the callback when user asks for spam detection details for the ban.
 // callback data: !userID:msgID
-func (a *admin) callbackShowInfo(query *tbapi.CallbackQuery) error {
+func (a *admin) callbackShowInfo(_ *ChatContext, query *tbapi.CallbackQuery) error {
 	callbackData := query.Data
 	spamInfoText := "**can't get spam info**"
 	spamInfo := []string{}
@@ -1033,14 +1073,14 @@ func (a *admin) callbackShowInfo(query *tbapi.CallbackQuery) error {
 }
 
 // deleteAndBan deletes the message and bans the user
-func (a *admin) deleteAndBan(query *tbapi.CallbackQuery, userID int64, msgID int) error {
+func (a *admin) deleteAndBan(c *ChatContext, query *tbapi.CallbackQuery, userID int64, msgID int) error {
 	errs := new(multierror.Error)
 	userName := a.locator.UserNameByID(context.TODO(), userID)
 	banReq := banRequest{
 		duration:  bot.PermanentBanDuration,
 		userID:    userID,
 		channelID: channelIDFromCallback(userID),
-		chatID:    a.primChatID,
+		chatID:    c.PrimaryChatID,
 		tbAPI:     a.tbAPI,
 		dry:       a.dry,
 		training:  false, // reset training flag, ban for real
@@ -1058,7 +1098,7 @@ func (a *admin) deleteAndBan(query *tbapi.CallbackQuery, userID int64, msgID int
 	// we allow deleting messages from supers. This can be useful if super is training the bot by adding spam messages
 	_, err := a.tbAPI.Request(tbapi.DeleteMessageConfig{BaseChatMessage: tbapi.BaseChatMessage{
 		MessageID:  msgID,
-		ChatConfig: tbapi.ChatConfig{ChatID: a.primChatID},
+		ChatConfig: tbapi.ChatConfig{ChatID: c.PrimaryChatID},
 	}})
 	if err != nil {
 		return fmt.Errorf("failed to delete message %d: %w", query.Message.MessageID, err)
