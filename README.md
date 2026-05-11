@@ -926,9 +926,31 @@ It also has an example of [docker-compose.yml](https://github.com/umputun/tg-spa
 
 ## Running tg-spam for multiple groups
 
-It is not possible to run the bot for multiple groups, as the bot is designed to work with a single group only. However, it is possible to run multiple instances of the bot with different tokens and different groups. Note: it has to have a token per bot, because TG doesn't allow using the same token for multiple bots at the same time, and such a reuse attempt will prevent the bot from working properly.
+A single tg-spam instance can monitor multiple Telegram groups concurrently. Configure the groups under `telegram.groups` in YAML or via the database-backed settings. Each group has a stable `gid` identifier used for callback routing and log filtering.
 
-At the same time, multiple instances of the bot can share the same set of samples and dynamic data files. To do so, user should mount the same directory with samples and dynamic data files to all the instances of the bot.
+YAML example:
+
+```yaml
+telegram:
+  token: your-telegram-token
+  groups:
+    - group: production_chat
+      gid: prod
+    - group: staging_chat
+      gid: staging
+```
+
+Notes:
+
+- The single-group form (`telegram.group` / `TELEGRAM_GROUP=foo`) keeps working as before — it is mapped internally to a one-entry `groups` slice with `gid` derived from `--instance-id`.
+- All entries must have unique `gid` and unique `group`. Empty `gid` is auto-filled from `InstanceID`.
+- The admin chat (`admin.group` / `ADMIN_GROUP`) stays single — one admin chat receives spam-forwards from all monitored groups.
+- The spam classifier and dynamic samples are shared across all configured groups; each group has its own locator, approved-user list, and detected-spam log.
+- Superusers default to per-group resolution (only the first group's admins). Set `admin.superusers_cross_chat: true` to aggregate admins from every configured group.
+- Inline keyboards in the admin chat embed `gid` so unban/ban/info callbacks route to the correct group. Logs for per-group events are prefixed with `[gid=<GID>]` for grep-friendly multi-group observability.
+- `GET /chats` on the webapi returns the configured group list with their gids.
+
+Running multiple separate instances is still supported — useful if groups must be isolated by token or database. In that case, set distinct `--instance-id` and `--db` values per instance.
 
 ## Using tg-spam as a library
 
