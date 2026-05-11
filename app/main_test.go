@@ -26,6 +26,7 @@ import (
 	"github.com/umputun/tg-spam/app/storage"
 	"github.com/umputun/tg-spam/app/storage/engine"
 	"github.com/umputun/tg-spam/lib/spamcheck"
+	"github.com/umputun/tg-spam/lib/tgspam"
 )
 
 func TestMakeSpamLogger(t *testing.T) {
@@ -304,7 +305,7 @@ func TestMakeSpamLogWriter(t *testing.T) {
 func Test_makeDetector(t *testing.T) {
 	t.Run("basic settings", func(t *testing.T) {
 		settings := makeTestSettings()
-		res := makeDetector(settings)
+		res := makeDetector(settings, tgspam.NewSamplesModel())
 		assert.NotNil(t, res)
 	})
 
@@ -315,7 +316,7 @@ func Test_makeDetector(t *testing.T) {
 		settings.Files.DynamicDataPath = "/tmp"
 		settings.FirstMessagesCount = 10
 
-		res := makeDetector(settings)
+		res := makeDetector(settings, tgspam.NewSamplesModel())
 		assert.NotNil(t, res)
 		assert.Equal(t, 10, res.FirstMessagesCount)
 		assert.True(t, res.FirstMessageOnly)
@@ -329,7 +330,7 @@ func Test_makeDetector(t *testing.T) {
 		settings.FirstMessagesCount = 10
 		settings.ParanoidMode = true
 
-		res := makeDetector(settings)
+		res := makeDetector(settings, tgspam.NewSamplesModel())
 		assert.NotNil(t, res)
 		assert.Equal(t, 0, res.FirstMessagesCount)
 		assert.False(t, res.FirstMessageOnly)
@@ -340,7 +341,7 @@ func Test_makeDetector(t *testing.T) {
 		settings.MaxShortMsgCount = 3
 		settings.FirstMessagesCount = 2
 
-		res := makeDetector(settings)
+		res := makeDetector(settings, tgspam.NewSamplesModel())
 		assert.NotNil(t, res)
 		assert.Equal(t, 3, res.MaxShortMsgCount)
 		assert.Equal(t, 2, res.FirstMessagesCount)
@@ -349,7 +350,7 @@ func Test_makeDetector(t *testing.T) {
 	t.Run("max short msg count default zero", func(t *testing.T) {
 		settings := makeTestSettings()
 
-		res := makeDetector(settings)
+		res := makeDetector(settings, tgspam.NewSamplesModel())
 		assert.NotNil(t, res)
 		assert.Equal(t, 0, res.MaxShortMsgCount)
 	})
@@ -363,7 +364,7 @@ func Test_initLuaPlugins(t *testing.T) {
 		settings.LuaPlugins.EnabledPlugins = []string{"plugin1", "plugin2"}
 		settings.LuaPlugins.DynamicReload = true
 
-		detector := makeDetector(makeTestSettings()) // create a clean detector
+		detector := makeDetector(makeTestSettings(), tgspam.NewSamplesModel()) // create a clean detector
 
 		// run the function to test
 		initLuaPlugins(detector, settings)
@@ -386,7 +387,7 @@ func Test_initLuaPlugins(t *testing.T) {
 		// no specific plugins enabled - should enable all
 		settings.LuaPlugins.DynamicReload = false
 
-		detector := makeDetector(makeTestSettings()) // create a clean detector
+		detector := makeDetector(makeTestSettings(), tgspam.NewSamplesModel()) // create a clean detector
 
 		// run the function to test
 		initLuaPlugins(detector, settings)
@@ -416,7 +417,7 @@ func Test_makeSpamBot(t *testing.T) {
 		settings.Files.DynamicDataPath = tmpDir
 		settings.InstanceID = "gr1"
 
-		detector := makeDetector(settings)
+		detector := makeDetector(settings, tgspam.NewSamplesModel())
 		db, err := engine.NewSqlite(path.Join(tmpDir, "tg-spam.db"), "gr1")
 		require.NoError(t, err)
 		defer db.Close()

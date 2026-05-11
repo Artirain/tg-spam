@@ -448,8 +448,10 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 		return fmt.Errorf("can't make db, %w", err)
 	}
 
-	// make detector with all sample files loaded
-	detector := makeDetector(settings)
+	// make detector with all sample files loaded; sharedModel is reused by
+	// per-chat detectors so the classifier state stays global across chats
+	sharedModel := tgspam.NewSamplesModel()
+	detector := makeDetector(settings, sharedModel)
 
 	// make spam bot
 	spamBot, err := makeSpamBot(ctx, settings, dataDB, detector)
@@ -524,28 +526,81 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 	defer loggerWr.Close()
 
 	// make spam logger
-	spamLogger, detectedSpamStore, err := makeSpamLogger(ctx, settings.InstanceID, loggerWr, dataDB)
+	// the legacy single-chat detected-spam store is shadowed by the per-chat one
+	// built in the loop below; kept here so tgListener.SpamLogger stays wired
+	// until Task 4 routes everything through Chats[]
+	spamLogger, _, err := makeSpamLogger(ctx, settings.InstanceID, loggerWr, dataDB)
 	if err != nil {
 		return fmt.Errorf("can't make spam logger, %w", err)
 	}
-	chatCtxs := make([]*runtimeChatContext, 0, len(settings.Telegram.Groups))
+	// build per-chat runtime contexts. Each chat gets its own scoped stores,
+	// detector (sharing the global samples model) and spam filter. The legacy
+	// single-instance fields above are still consumed by TelegramListener.Do()
+	// methods; Task 4 of the multi-chat plan removes them in favor of Chats.
+	chats := make([]*events.ChatContext, 0, len(settings.Telegram.Groups))
 	for i := range settings.Telegram.Groups {
 		gcfg := settings.Telegram.Groups[i]
 		scopedDB := dataDB.WithGID(gcfg.GID)
-		chatCtxs = append(chatCtxs, &runtimeChatContext{
-			gid:           gcfg.GID,
-			scopedDB:      scopedDB,
-			detector:      detector,           // shared single instance — per-chat split is Phase 4
-			spamFilter:    spamBot,            // shared — per-chat split is Phase 4
-			locator:       locator,            // single — per-chat in Phase 4
-			approvedUsers: approvedUsersStore, // single — per-chat in Phase 4
-			detectedSpam:  detectedSpamStore,
-			reports:       reportsStore,
-			warnings:      warningsStore,
+
+		chatLocator, lErr := storage.NewLocator(ctx, settings.History.Duration, settings.History.MinSize, scopedDB)
+		if lErr != nil {
+			return fmt.Errorf("can't make locator for chat %s, %w", gcfg.GID, lErr)
+		}
+
+		chatApprovedUsers, auErr := storage.NewApprovedUsers(ctx, scopedDB)
+		if auErr != nil {
+			return fmt.Errorf("can't make approved users for chat %s, %w", gcfg.GID, auErr)
+		}
+
+		chatSpamLogger, chatDetectedSpam, slErr := makeSpamLogger(ctx, gcfg.GID, loggerWr, scopedDB)
+		if slErr != nil {
+			return fmt.Errorf("can't make spam logger for chat %s, %w", gcfg.GID, slErr)
+		}
+
+		var chatReports *storage.Reports
+		if settings.Report.Enabled {
+			chatReports, err = storage.NewReports(ctx, scopedDB)
+			if err != nil {
+				return fmt.Errorf("can't make reports for chat %s, %w", gcfg.GID, err)
+			}
+		}
+
+		var chatWarnings *storage.Warnings
+		if settings.Warn.Threshold > 0 {
+			chatWarnings, err = storage.NewWarnings(ctx, scopedDB)
+			if err != nil {
+				return fmt.Errorf("can't make warnings for chat %s, %w", gcfg.GID, err)
+			}
+		}
+
+		// per-chat detector reuses the shared samples model so the classifier
+		// stays global, but approved-users and duplicate-detector are isolated
+		chatDetector := makeDetector(settings, sharedModel)
+		if _, err = chatDetector.WithUserStorage(chatApprovedUsers); err != nil {
+			return fmt.Errorf("can't load approved users for chat %s, %w", gcfg.GID, err)
+		}
+		chatDetector.WithMessageCounter(chatLocator)
+
+		// makeSpamBot always takes the root dataDB so samples and dictionary
+		// stores stay global; the per-chat detector parameter differentiates
+		// behavior between SpamFilter instances
+		chatSpamBot, sbErr := makeSpamBot(ctx, settings, dataDB, chatDetector)
+		if sbErr != nil {
+			return fmt.Errorf("can't make spam bot for chat %s, %w", gcfg.GID, sbErr)
+		}
+
+		chats = append(chats, &events.ChatContext{
+			Group:         gcfg.Group,
+			GID:           gcfg.GID,
+			Bot:           chatSpamBot,
+			Locator:       chatLocator,
+			ApprovedUsers: chatApprovedUsers,
+			DetectedSpam:  chatDetectedSpam,
+			SpamLogger:    chatSpamLogger,
+			Reports:       chatReports,
+			Warnings:      chatWarnings,
 		})
-	}
-	for _, c := range chatCtxs {
-		log.Printf("[INFO] chat context wired: gid=%s (multi-chat routing pending Phase 4)", c.gid)
+		log.Printf("[INFO] chat context wired: gid=%s, group=%s", gcfg.GID, gcfg.Group)
 	}
 
 	// make telegram listener
@@ -583,6 +638,8 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 		WarnThreshold:           settings.Warn.Threshold,
 		WarnWindow:              settings.Warn.Window,
 		Warnings:                warningsStore,
+		Chats:                   chats,
+		SuperUsersCrossChat:     settings.Admin.SuperUsersCrossChat,
 	}
 
 	if settings.Delete.JoinMessages {
@@ -611,23 +668,6 @@ func execute(ctx context.Context, settings *config.Settings, reloadNormalize fun
 		return fmt.Errorf("telegram listener failed, %w", err)
 	}
 	return nil
-}
-
-// runtimeChatContext is the per-chat runtime bundle resolved at startup.
-// One instance per ConfiguredChat in Settings.Telegram.Groups. Phase 2 only
-// populates this for the single configured chat (cap = 1 in NormalizeGroups);
-// Phase 4 will move this type to app/events with listener-friendly interfaces
-// and route updates per chat-id.
-type runtimeChatContext struct {
-	gid           string
-	scopedDB      *engine.SQL
-	detector      *tgspam.Detector
-	spamFilter    *bot.SpamFilter
-	locator       *storage.Locator
-	approvedUsers *storage.ApprovedUsers
-	detectedSpam  *storage.DetectedSpam
-	reports       *storage.Reports
-	warnings      *storage.Warnings
 }
 
 // makeDB creates database connection based on the settings model
@@ -797,8 +837,9 @@ func activateServer(ctx context.Context, settings *config.Settings, sf *bot.Spam
 }
 
 // makeDetector creates spam detector with all checkers and updaters
-// it loads samples and dynamic files
-func makeDetector(settings *config.Settings) *tgspam.Detector {
+// it loads samples and dynamic files. The provided SamplesModel is shared
+// across detectors so per-chat instances reuse the same classifier state.
+func makeDetector(settings *config.Settings, model *tgspam.SamplesModel) *tgspam.Detector {
 	detectorConfig := tgspam.Config{
 		MaxAllowedEmoji:     settings.MaxEmoji,
 		MinMsgLen:           settings.MinMsgLen,
@@ -848,7 +889,7 @@ func makeDetector(settings *config.Settings) *tgspam.Detector {
 			settings.Reactions.MaxReactions, settings.Reactions.Window)
 	}
 
-	detector := tgspam.NewDetector(detectorConfig)
+	detector := tgspam.NewDetectorWithModel(detectorConfig, model)
 
 	if settings.IsOpenAIEnabled() {
 		log.Printf("[WARN] openai enabled")
