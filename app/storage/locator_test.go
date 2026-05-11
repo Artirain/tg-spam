@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strconv"
 	"testing"
@@ -679,4 +680,71 @@ func TestLocator_Migration_Idempotent(t *testing.T) {
 	meta, ok := loc2.Message(ctx, "x")
 	require.True(t, ok, "data must survive idempotent re-migration")
 	assert.Equal(t, int64(1), meta.ChatID)
+}
+
+func TestLocator_Migration_FromLegacySchema(t *testing.T) {
+	ctx := context.Background()
+	db, err := engine.New(ctx, ":memory:", "test-instance")
+	require.NoError(t, err)
+	defer db.Close()
+
+	// BEFORE NewLocator: manually create legacy schema (PRIMARY KEY hash; no gid column)
+	// This simulates a pre-Phase-2 install. The migrate function will:
+	//   1. ALTER TABLE ADD COLUMN gid (skipped if already there)
+	//   2. UPDATE rows SET gid = ? WHERE gid = ''
+	//   3. NEW: detect old PK and run create-copy-drop-rename to new schema
+	_, err = db.ExecContext(ctx, `CREATE TABLE messages (
+        hash TEXT PRIMARY KEY,
+        time TIMESTAMP,
+        chat_id INTEGER,
+        user_id INTEGER,
+        user_name TEXT,
+        msg_id INTEGER
+    )`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `CREATE TABLE spam (
+        user_id INTEGER PRIMARY KEY,
+        time TIMESTAMP,
+        checks TEXT
+    )`)
+	require.NoError(t, err)
+
+	// seed legacy data (no gid column yet); use a real sha256 hash so loc.Message lookup works
+	legacyMsg := "legacy message"
+	legacyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(legacyMsg)))
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO messages (hash, time, chat_id, user_id, user_name, msg_id) VALUES (?, datetime('now'), 100, 1, 'u', 10)`,
+		legacyHash)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO spam (user_id, time, checks) VALUES (?, datetime('now'), '[]')`, 555)
+	require.NoError(t, err)
+
+	// NewLocator triggers full migrate(): ALTER ADD COLUMN gid + backfill + PK migration
+	loc, err := NewLocator(ctx, time.Hour, 0, db)
+	require.NoError(t, err)
+
+	// legacy row must survive the migration
+	meta, ok := loc.Message(ctx, legacyMsg)
+	require.True(t, ok, "legacy row must survive migration")
+	assert.Equal(t, int64(100), meta.ChatID)
+	assert.Equal(t, int64(1), meta.UserID)
+	assert.Equal(t, "u", meta.UserName)
+	assert.Equal(t, 10, meta.MsgID)
+
+	// verify gid was backfilled via direct SQL (MsgMeta doesn't expose gid)
+	var gid string
+	require.NoError(t, db.GetContext(ctx, &gid, "SELECT gid FROM messages WHERE hash = ?", legacyHash))
+	assert.Equal(t, "test-instance", gid)
+
+	// verify new schema is in place: messages.id column should exist now
+	var hasIDColumn int
+	require.NoError(t, db.GetContext(ctx, &hasIDColumn,
+		`SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'id'`))
+	assert.Equal(t, 1, hasIDColumn, "messages must have surrogate id column after migration")
+
+	// verify the spam row survived too
+	var spamGID string
+	require.NoError(t, db.GetContext(ctx, &spamGID, "SELECT gid FROM spam WHERE user_id = ?", 555))
+	assert.Equal(t, "test-instance", spamGID)
 }
