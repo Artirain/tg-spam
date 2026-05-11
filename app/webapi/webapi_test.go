@@ -1281,6 +1281,45 @@ func TestServer_getSettingsHandler(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rr.Code)
 	})
 }
+
+func TestServer_getChatsHandler(t *testing.T) {
+	t.Run("multi-chat returns all configured groups", func(t *testing.T) {
+		appSettings := &config.Settings{InstanceID: "test"}
+		appSettings.Telegram.Groups = []config.ConfiguredChat{
+			{Group: "g1", GID: "prod"},
+			{Group: "g2", GID: "staging"},
+		}
+		server := NewServer(Config{Version: "1.0", AppSettings: appSettings})
+		rr := httptest.NewRecorder()
+		req, err := http.NewRequest("GET", "/chats", http.NoBody)
+		require.NoError(t, err)
+		http.HandlerFunc(server.getChatsHandler).ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp struct {
+			Chats []chatInfo `json:"chats"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		require.Len(t, resp.Chats, 2)
+		assert.Equal(t, "prod", resp.Chats[0].GID)
+		assert.Equal(t, "g1", resp.Chats[0].Group)
+		assert.Equal(t, "staging", resp.Chats[1].GID)
+		assert.Equal(t, "g2", resp.Chats[1].Group)
+	})
+	t.Run("empty settings returns empty list", func(t *testing.T) {
+		server := NewServer(Config{Version: "1.0"})
+		rr := httptest.NewRecorder()
+		req, err := http.NewRequest("GET", "/chats", http.NoBody)
+		require.NoError(t, err)
+		http.HandlerFunc(server.getChatsHandler).ServeHTTP(rr, req)
+		assert.Equal(t, http.StatusOK, rr.Code)
+		var resp struct {
+			Chats []chatInfo `json:"chats"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+		assert.Empty(t, resp.Chats)
+	})
+}
+
 func TestServer_htmlSettingsHandler(t *testing.T) {
 	// test without StorageEngine (default case)
 	t.Run("without storage engine", func(t *testing.T) {

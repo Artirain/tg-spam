@@ -289,6 +289,7 @@ func (s *Server) routes(router *routegroup.Bundle) *routegroup.Bundle {
 		})
 
 		authApi.HandleFunc("GET /settings", s.getSettingsHandler) // get application settings
+		authApi.HandleFunc("GET /chats", s.getChatsHandler)       // get configured telegram chats
 
 		authApi.Mount("/dictionary").Route(func(r *routegroup.Bundle) { // manage dictionary
 			// add stop phrase or ignored word
@@ -625,6 +626,30 @@ func (s *Server) getSettingsHandler(w http.ResponseWriter, _ *http.Request) {
 		LuaAvailablePlugins: s.Detector.GetLuaPluginNames(),
 	}
 	rest.RenderJSON(w, resp)
+}
+
+// chatInfo is a single configured telegram chat exposed via the /chats endpoint.
+// it carries the operator-visible group identifier and the gid used for per-chat
+// callback routing and per-chat log filtering.
+type chatInfo struct {
+	GID   string `json:"gid"`
+	Group string `json:"group"`
+}
+
+// getChatsHandler returns the list of telegram chats configured for the running
+// instance. When the bot operates in legacy single-chat mode the returned slice
+// has one entry derived from telegram.group; in multi-chat mode it lists every
+// configured group with its gid.
+func (s *Server) getChatsHandler(w http.ResponseWriter, _ *http.Request) {
+	s.appSettingsMu.RLock()
+	defer s.appSettingsMu.RUnlock()
+	out := []chatInfo{}
+	if s.AppSettings != nil {
+		for _, g := range s.AppSettings.Telegram.Groups {
+			out = append(out, chatInfo{GID: g.GID, Group: g.Group})
+		}
+	}
+	rest.RenderJSON(w, rest.JSON{"chats": out})
 }
 
 // getDictionaryEntriesHandler handles GET /dictionary request. It returns stop phrases and ignored words.
