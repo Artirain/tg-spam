@@ -50,6 +50,15 @@ type Bot interface {
 	IsApprovedUser(userID int64) bool
 }
 
+// gidTag returns "[gid=X] " when c is non-nil with a non-empty GID, else "".
+// used to prefix per-chat log messages so operators can grep multi-chat logs by group id.
+func gidTag(c *ChatContext) string {
+	if c == nil || c.GID == "" {
+		return ""
+	}
+	return "[gid=" + c.GID + "] "
+}
+
 // escapeMarkDownV1Text escapes special characters used in Telegram's MarkdownV1 parse mode.
 // It escapes: _ (underscore), * (asterisk), ` (backtick), [ (left bracket)
 // This is used when re-parsing already rendered text to prevent markdown parsing errors.
