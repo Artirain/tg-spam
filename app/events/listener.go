@@ -69,6 +69,14 @@ type TelegramListener struct {
 	WarnWindow              time.Duration // sliding window for counting warns
 	Warnings                Warnings      // storage for admin /warn records
 
+	// multi-chat additions, populated by main.go and consumed by Do() to build the routing maps
+	Chats               []*ChatContext
+	SuperUsersCrossChat bool
+
+	// derived at Do() startup from Chats, used for routing (wired in Task 2)
+	byPrimary map[int64]*ChatContext  //nolint:unused // populated in Task 2
+	byGID     map[string]*ChatContext //nolint:unused // populated in Task 2
+
 	adminHandler    *admin
 	reportsHandler  *userReports
 	dmUsers         dmUsers // recent DM senders, stored in memory for admin UI
