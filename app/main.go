@@ -44,6 +44,7 @@ type options struct {
 	DataBaseURL        string `long:"db" env:"DB" default:"tg-spam.db" description:"database URL, if empty uses sqlite"`
 	ConfigDB           bool   `long:"confdb" env:"CONFDB" description:"load configuration from database"`
 	ConfigDBEncryptKey string `long:"confdb-encrypt-key" env:"CONFDB_ENCRYPT_KEY" description:"encryption key for sensitive config values in database"`
+	ConfigFile         string `long:"config" env:"CONFIG" description:"path to YAML overlay file for fields not exposed via CLI/env (telegram.groups, admin.superusers_cross_chat)"`
 
 	Telegram struct {
 		Token        string        `long:"token" env:"TOKEN" description:"telegram bot token"`
@@ -315,6 +316,15 @@ func main() {
 	} else {
 		// traditional mode - CLI is source of truth
 		appSettings = optToSettings(opts)
+	}
+
+	// apply YAML overlay (multi-chat groups + cross-chat super-users) on top of
+	// CLI/env or CONFDB-resolved settings. Runs in both modes so a yaml file can
+	// supply Telegram.Groups even when --confdb is active (CONFDB does not yet
+	// persist Groups; see app/config/settings.go json:"-" tag).
+	if err := applyYAMLOverlay(opts.ConfigFile, appSettings); err != nil {
+		log.Printf("[ERROR] %v", err)
+		os.Exit(1)
 	}
 
 	// setup logger with masked secrets BEFORE any subcommand dispatch so any
