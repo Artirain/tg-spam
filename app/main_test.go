@@ -1349,19 +1349,94 @@ func TestREADMEAllOptionsMatchesHelp(t *testing.T) {
 func TestReloadNormalize_RunsNormalizeGroups(t *testing.T) {
 	defaults := &config.Settings{}
 	var opts options
-	reloadNormalize := func(s *config.Settings) {
+	reloadNormalize := func(s *config.Settings) error {
 		s.ApplyDefaults(defaults)
 		applyOperationalCLIOverrides(s, opts, defaults)
 		normalizeFilePaths(s)
 		if err := s.NormalizeGroups(); err != nil {
-			t.Logf("normalize warning: %v", err)
+			return err
 		}
+		return nil
 	}
 
 	s := &config.Settings{InstanceID: "reload-test"}
 	s.Telegram.Group = "GroupFromBlob"
-	reloadNormalize(s)
+	require.NoError(t, reloadNormalize(s))
 	require.Len(t, s.Telegram.Groups, 1, "NormalizeGroups must materialize Groups from legacy Group field")
 	assert.Equal(t, "GroupFromBlob", s.Telegram.Groups[0].Group)
 	assert.Equal(t, "reload-test", s.Telegram.Groups[0].GID)
+}
+
+// TestReloadNormalize_ReappliesYAMLOverlay locks the contract that the reload
+// closure built in main() re-applies the YAML overlay. Without this, POST
+// /config/reload (which loads a DB blob lacking the json:"-" Groups +
+// SuperUsersCrossChat fields) silently degrades a multi-chat bot to single-chat.
+func TestReloadNormalize_ReappliesYAMLOverlay(t *testing.T) {
+	yamlPath := filepath.Join(t.TempDir(), "config.yml")
+	require.NoError(t, os.WriteFile(yamlPath, []byte(`
+telegram:
+  groups:
+    - group: "from-yaml-1"
+      gid: y1
+    - group: "from-yaml-2"
+      gid: y2
+admin:
+  superusers_cross_chat: true
+`), 0o600))
+
+	defaults := &config.Settings{}
+	var opts options
+	opts.ConfigFile = yamlPath
+	configFile := opts.ConfigFile
+	reloadNormalize := func(s *config.Settings) error {
+		s.ApplyDefaults(defaults)
+		applyOperationalCLIOverrides(s, opts, defaults)
+		normalizeFilePaths(s)
+		if err := applyYAMLOverlay(configFile, s); err != nil {
+			return err
+		}
+		if err := s.NormalizeGroups(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// simulate post-reload state: DB blob has neither Groups nor SuperUsersCrossChat
+	// (they carry json:"-"), so the in-memory settings come back empty.
+	s := &config.Settings{InstanceID: "reload-test"}
+	require.NoError(t, reloadNormalize(s))
+
+	require.Len(t, s.Telegram.Groups, 2, "YAML overlay must restore Groups after reload")
+	assert.Equal(t, "from-yaml-1", s.Telegram.Groups[0].Group)
+	assert.Equal(t, "y1", s.Telegram.Groups[0].GID)
+	assert.Equal(t, "from-yaml-2", s.Telegram.Groups[1].Group)
+	assert.True(t, s.Admin.SuperUsersCrossChat, "YAML overlay must restore SuperUsersCrossChat after reload")
+}
+
+// TestReloadNormalize_PropagatesYAMLError verifies that a broken YAML overlay
+// during reload surfaces as a non-nil error so loadConfigHandler can abort
+// instead of silently degrading the running configuration.
+func TestReloadNormalize_PropagatesYAMLError(t *testing.T) {
+	yamlPath := filepath.Join(t.TempDir(), "config.yml")
+	require.NoError(t, os.WriteFile(yamlPath, []byte("telegram: [not, a, map"), 0o600))
+
+	defaults := &config.Settings{}
+	var opts options
+	opts.ConfigFile = yamlPath
+	configFile := opts.ConfigFile
+	reloadNormalize := func(s *config.Settings) error {
+		s.ApplyDefaults(defaults)
+		applyOperationalCLIOverrides(s, opts, defaults)
+		normalizeFilePaths(s)
+		if err := applyYAMLOverlay(configFile, s); err != nil {
+			return err
+		}
+		if err := s.NormalizeGroups(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	err := reloadNormalize(&config.Settings{InstanceID: "reload-test"})
+	require.Error(t, err, "malformed YAML overlay must propagate, not swallow into WARN")
 }

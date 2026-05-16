@@ -79,6 +79,13 @@ type Config struct {
 	BotUsername     string           // resolved telegram bot username
 	AppSettings     *config.Settings // application settings (domain model)
 	ConfigDBMode    bool             // indicates if app is running with database config
+	// YAMLOverlayActive is set when the operator started the bot with a
+	// --config YAML overlay (telegram.groups, admin.superusers_cross_chat).
+	// Those fields carry json:"-" and would be silently dropped by any code
+	// path that persists settings through SettingsStore.Save (JSON marshal).
+	// When true, POST /config and PUT /config?saveToDb=true refuse with 409 so
+	// the operator can't accidentally clobber the DB with a YAML-stripped blob.
+	YAMLOverlayActive bool
 	// ReloadNormalize, when non-nil, is invoked by loadConfigHandler on the
 	// freshly loaded *config.Settings before transient/auth preservation. It
 	// must perform the same defaults-fill and operational CLI override
@@ -87,7 +94,13 @@ type Config struct {
 	// --files.dynamic / --files.samples / --server.listen / --dry survive
 	// POST /config/reload. Credentials (Telegram/OpenAI/Gemini tokens) are
 	// intentionally NOT reapplied here — DB rotation wins on reload.
-	ReloadNormalize func(*config.Settings)
+	//
+	// Returning a non-nil error aborts the reload: loadConfigHandler responds
+	// 500 and leaves the in-memory AppSettings untouched. This is the only way
+	// for YAML overlay parse failures, invalid duplicate gids, or other
+	// post-load validation errors to surface to the operator instead of
+	// silently degrading the running configuration.
+	ReloadNormalize func(*config.Settings) error
 }
 
 // Detector is a spam detector interface.

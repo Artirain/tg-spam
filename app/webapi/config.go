@@ -33,6 +33,19 @@ func (s *Server) saveConfigHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// refuse persistence when a --config YAML overlay is active: store.Save
+	// marshals to JSON (see app/config/store.go:196) and telegram.groups +
+	// admin.superusers_cross_chat carry json:"-" so they would silently vanish
+	// from the DB blob. The web UI would report "saved" while a subsequent
+	// --confdb start without --config would come up without multi-chat groups.
+	if s.YAMLOverlayActive {
+		const msg = "Configuration save refused: --config YAML overlay is active. " +
+			"YAML-only fields (telegram.groups, admin.superusers_cross_chat) are not persisted to the database."
+		log.Printf("[WARN] %s", msg)
+		http.Error(w, msg, http.StatusConflict)
+		return
+	}
+
 	// save current settings to database; hold the read lock across the call so
 	// concurrent mutations don't race with JSON encoding in the store
 	s.appSettingsMu.RLock()
@@ -85,8 +98,19 @@ func (s *Server) loadConfigHandler(w http.ResponseWriter, r *http.Request) {
 	// --server.listen, --dry) so reload doesn't silently revert them to DB values.
 	// run BEFORE transient/auth preservation so the closure can't accidentally
 	// touch in-memory transient state.
+	//
+	// A non-nil error here aborts the reload: we don't swap AppSettings, the
+	// current in-memory configuration keeps running, and the operator sees 500.
+	// Errors come from YAML overlay parse/read failures and post-overlay group
+	// validation (duplicate gid, malformed group entries) — silently dropping
+	// these would degrade a multi-chat bot to whatever subset survived.
 	if s.ReloadNormalize != nil {
-		s.ReloadNormalize(settings)
+		if err := s.ReloadNormalize(settings); err != nil {
+			s.appSettingsMu.Unlock()
+			log.Printf("[ERROR] reload normalize failed, keeping current in-memory configuration: %v", err)
+			http.Error(w, fmt.Sprintf("Failed to apply reloaded configuration: %v", err), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// preserve transient settings (never stored in DB). Tokens are NOT preserved:
@@ -151,6 +175,19 @@ func (s *Server) updateConfigHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	saveToDB := r.FormValue("saveToDb") == "true" && s.SettingsStore != nil
+	if saveToDB && s.YAMLOverlayActive {
+		// see saveConfigHandler for the rationale: persisting through JSON marshal
+		// would silently strip telegram.groups + admin.superusers_cross_chat.
+		// roll back the in-memory mutations so the operator's "Save" attempt has
+		// no observable effect — partial application would be worse than refusal.
+		*s.AppSettings = snapshot
+		s.appSettingsMu.Unlock()
+		const msg = "Configuration save refused: --config YAML overlay is active. " +
+			"YAML-only fields (telegram.groups, admin.superusers_cross_chat) are not persisted to the database."
+		log.Printf("[WARN] %s", msg)
+		http.Error(w, msg, http.StatusConflict)
+		return
+	}
 	if saveToDB {
 		log.Printf("[DEBUG] saving settings to database")
 		if err := s.SettingsStore.Save(r.Context(), s.AppSettings); err != nil {

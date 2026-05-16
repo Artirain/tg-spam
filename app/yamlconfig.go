@@ -15,12 +15,16 @@ import (
 // remains the source of truth for everything else. Currently this covers
 // Telegram.Groups (multi-chat target list) and Admin.SuperUsersCrossChat
 // (cross-chat super-user resolution opt-in).
+//
+// SuperUsersCrossChat is a pointer so an omitted key leaves the resolved
+// value untouched — assigning a zero-value bool would silently flip the
+// flag off when the YAML file does not mention it.
 type yamlOverlay struct {
 	Telegram struct {
 		Groups []config.ConfiguredChat `yaml:"groups"`
 	} `yaml:"telegram"`
 	Admin struct {
-		SuperUsersCrossChat bool `yaml:"superusers_cross_chat"`
+		SuperUsersCrossChat *bool `yaml:"superusers_cross_chat"`
 	} `yaml:"admin"`
 }
 
@@ -46,6 +50,8 @@ func applyYAMLOverlay(path string, settings *config.Settings) error {
 	if len(overlay.Telegram.Groups) > 0 {
 		settings.Telegram.Groups = overlay.Telegram.Groups
 	}
-	settings.Admin.SuperUsersCrossChat = overlay.Admin.SuperUsersCrossChat
+	if overlay.Admin.SuperUsersCrossChat != nil {
+		settings.Admin.SuperUsersCrossChat = *overlay.Admin.SuperUsersCrossChat
+	}
 	return nil
 }

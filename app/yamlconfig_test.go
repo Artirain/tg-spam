@@ -75,6 +75,32 @@ admin:
 		assert.True(t, s.Admin.SuperUsersCrossChat)
 	})
 
+	t.Run("superusers_cross_chat absent leaves existing value", func(t *testing.T) {
+		// overlay must not overwrite a pre-existing true with a zero-value bool
+		// just because the YAML file omits the key (regression: was bool, now *bool)
+		f := writeTempYAML(t, `
+telegram:
+  groups:
+    - group: "g"
+      gid: "x"
+`)
+		s := &config.Settings{}
+		s.Admin.SuperUsersCrossChat = true
+		require.NoError(t, applyYAMLOverlay(f, s))
+		assert.True(t, s.Admin.SuperUsersCrossChat)
+	})
+
+	t.Run("superusers_cross_chat explicit false overrides", func(t *testing.T) {
+		f := writeTempYAML(t, `
+admin:
+  superusers_cross_chat: false
+`)
+		s := &config.Settings{}
+		s.Admin.SuperUsersCrossChat = true
+		require.NoError(t, applyYAMLOverlay(f, s))
+		assert.False(t, s.Admin.SuperUsersCrossChat)
+	})
+
 	t.Run("missing file errors", func(t *testing.T) {
 		err := applyYAMLOverlay(filepath.Join(t.TempDir(), "nope.yml"), &config.Settings{})
 		require.Error(t, err)

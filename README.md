@@ -559,6 +559,7 @@ Success! The new status is: DISABLED. /help
       --db=                             database URL, if empty uses sqlite (default: tg-spam.db) [$DB]
       --confdb                          load configuration from database [$CONFDB]
       --confdb-encrypt-key=             encryption key for sensitive config values in database [$CONFDB_ENCRYPT_KEY]
+      --config=                         path to YAML overlay file for fields not exposed via CLI/env (telegram.groups, admin.superusers_cross_chat) [$TG_SPAM_CONFIG]
       --admin.group=                    admin group name, or channel id [$ADMIN_GROUP]
       --disable-admin-spam-forward      disable handling messages forwarded to admin group as spam [$DISABLE_ADMIN_SPAM_FORWARD]
       --testing-id=                     testing ids, allow bot to reply to them [$TESTING_ID]
@@ -926,23 +927,33 @@ It also has an example of [docker-compose.yml](https://github.com/umputun/tg-spa
 
 ## Running tg-spam for multiple groups
 
-A single tg-spam instance can monitor multiple Telegram groups concurrently. Configure the groups under `telegram.groups` in YAML or via the database-backed settings. Each group has a stable `gid` identifier used for callback routing and log filtering.
+A single tg-spam instance can monitor multiple Telegram groups concurrently. The multi-chat target list and the cross-chat super-user flag are supplied through a YAML overlay file because they cannot be expressed cleanly as CLI flags or env vars — point the bot at it with `--config=/path/to/config.yml` or `$TG_SPAM_CONFIG=/path/to/config.yml`. All other settings still come from CLI/env/`--confdb` as before; the overlay only fills in `telegram.groups` and `admin.superusers_cross_chat`. Each group has a stable `gid` identifier used for callback routing and log filtering.
 
 YAML example:
 
 ```yaml
 telegram:
-  token: your-telegram-token
   groups:
     - group: production_chat
       gid: prod
     - group: staging_chat
       gid: staging
+admin:
+  superusers_cross_chat: true
+```
+
+Run with:
+
+```
+tg-spam --config=/etc/tg-spam/config.yml --telegram.token=<token> ...
 ```
 
 Notes:
 
-- The single-group form (`telegram.group` / `TELEGRAM_GROUP=foo`) keeps working as before — it is mapped internally to a one-entry `groups` slice with `gid` derived from `--instance-id`.
+- The YAML overlay is strict — unknown keys at any nesting level (including under `telegram:` or `admin:`) produce a startup error so typos do not silently vanish. Only `telegram.groups` and `admin.superusers_cross_chat` are read; everything else must come from CLI/env.
+- The overlay is **not** persisted to the database. While `--config` is set, the bot refuses `save-config`, `POST /config` and `PUT /config?saveToDb=true` (HTTP 409) because `telegram.groups` and `admin.superusers_cross_chat` are marked `json:"-"` and would be silently dropped from the DB blob. Keep the YAML file alongside `--confdb` instead.
+- `POST /config/reload` re-reads the YAML overlay from disk every time, so editing `config.yml` and triggering reload picks up the new groups without a restart. A YAML parse error, missing file, or invalid group list (duplicate `gid`) makes reload fail with HTTP 500 and leaves the running configuration untouched.
+- The single-group form (`telegram.group` / `TELEGRAM_GROUP=foo`) keeps working as before — it is mapped internally to a one-entry `groups` slice with `gid` derived from `--instance-id`. Use either the single-group flag or the YAML overlay, not both.
 - All entries must have unique `gid` and unique `group`. Empty `gid` is auto-filled from `InstanceID`.
 - The admin chat (`admin.group` / `ADMIN_GROUP`) stays single — one admin chat receives spam-forwards from all monitored groups.
 - The spam classifier and dynamic samples are shared across all configured groups; each group has its own locator, approved-user list, and detected-spam log.

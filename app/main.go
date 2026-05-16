@@ -44,7 +44,7 @@ type options struct {
 	DataBaseURL        string `long:"db" env:"DB" default:"tg-spam.db" description:"database URL, if empty uses sqlite"`
 	ConfigDB           bool   `long:"confdb" env:"CONFDB" description:"load configuration from database"`
 	ConfigDBEncryptKey string `long:"confdb-encrypt-key" env:"CONFDB_ENCRYPT_KEY" description:"encryption key for sensitive config values in database"`
-	ConfigFile         string `long:"config" env:"CONFIG" description:"path to YAML overlay file for fields not exposed via CLI/env (telegram.groups, admin.superusers_cross_chat)"`
+	ConfigFile         string `long:"config" env:"TG_SPAM_CONFIG" description:"path to YAML overlay file for fields not exposed via CLI/env (telegram.groups, admin.superusers_cross_chat)"`
 
 	Telegram struct {
 		Token        string        `long:"token" env:"TOKEN" description:"telegram bot token"`
@@ -257,7 +257,8 @@ func main() {
 	// reloadNormalize captures the same defaults-fill + operational CLI override
 	// policy used at startup so POST /config/reload can apply it to a freshly
 	// loaded DB blob. nil in non-confdb mode (no reload endpoint exists there).
-	var reloadNormalize func(*config.Settings)
+	// Returning an error aborts the reload in webapi.loadConfigHandler.
+	var reloadNormalize func(*config.Settings) error
 
 	if opts.ConfigDB {
 		// database configuration mode - load from database first
@@ -304,14 +305,29 @@ func main() {
 		// operational CLI overrides; webapi's loadConfigHandler invokes it
 		// after Load so a partial/legacy DB blob plus operator-supplied
 		// --files.dynamic / --files.samples / --server.listen / --dry survive
-		// POST /config/reload.
-		reloadNormalize = func(s *config.Settings) {
+		// POST /config/reload. YAML overlay is re-applied here so multi-chat
+		// Groups and SuperUsersCrossChat (json:"-" — never persisted to DB)
+		// survive reload; without this, /config/reload silently degrades the
+		// bot to single-chat until process restart.
+		//
+		// A non-nil error here aborts the reload in webapi.loadConfigHandler:
+		// the in-memory AppSettings is kept and the operator sees a 500. Any
+		// YAML parse error, deleted file, or post-overlay validation failure
+		// (NormalizeGroups: duplicate gid, malformed entries) must surface to
+		// the operator instead of silently degrading the running configuration.
+		// configFile is captured by value; opts is not mutated after parse.
+		configFile := opts.ConfigFile
+		reloadNormalize = func(s *config.Settings) error {
 			s.ApplyDefaults(defaults)
 			applyOperationalCLIOverrides(s, opts, defaults)
 			normalizeFilePaths(s)
-			if err := s.NormalizeGroups(); err != nil {
-				log.Printf("[WARN] reload: invalid chat configuration: %v", err)
+			if err := applyYAMLOverlay(configFile, s); err != nil {
+				return fmt.Errorf("reload: yaml overlay: %w", err)
 			}
+			if err := s.NormalizeGroups(); err != nil {
+				return fmt.Errorf("reload: invalid chat configuration: %w", err)
+			}
+			return nil
 		}
 	} else {
 		// traditional mode - CLI is source of truth
@@ -326,6 +342,9 @@ func main() {
 		log.Printf("[ERROR] %v", err)
 		os.Exit(1)
 	}
+	// flag overlay as active so webapi save/update handlers can refuse persistence:
+	// store.Save marshals to JSON and would silently drop the YAML-only fields.
+	appSettings.Transient.YAMLOverlayActive = opts.ConfigFile != ""
 
 	// setup logger with masked secrets BEFORE any subcommand dispatch so any
 	// error wrapping inside saveConfigToDB or later stages benefits from the
@@ -362,6 +381,18 @@ func main() {
 
 	// handle save-config command (after setupLog so any error output is masked)
 	if p.Active != nil && p.Active.Name == "save-config" {
+		// refuse to persist when --config is in play: saveConfigToDB marshals
+		// settings to JSON (see app/config/store.go:196) and the overlay fields
+		// telegram.groups and admin.superusers_cross_chat carry json:"-" so they
+		// would be silently dropped from the DB blob. The operator would think
+		// the save succeeded but a subsequent --confdb start without --config
+		// would come up without groups.
+		if opts.ConfigFile != "" {
+			log.Printf("[ERROR] save-config is incompatible with --config: yaml-only fields " +
+				"(telegram.groups, admin.superusers_cross_chat) are not persisted to the database. " +
+				"keep the YAML file alongside --confdb instead of running save-config.")
+			os.Exit(1)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		exitCode := 0
 		if err := saveConfigToDB(ctx, appSettings); err != nil {
@@ -432,7 +463,7 @@ func validateSettings(s *config.Settings) error {
 // execute runs the main application loop. The reloadNormalize callback, when
 // non-nil, is forwarded to webapi so POST /config/reload can reapply startup-
 // equivalent defaults-fill and operational CLI overrides on top of the DB blob.
-func execute(ctx context.Context, settings *config.Settings, reloadNormalize func(*config.Settings)) error {
+func execute(ctx context.Context, settings *config.Settings, reloadNormalize func(*config.Settings) error) error {
 	if err := settings.NormalizeGroups(); err != nil {
 		return fmt.Errorf("invalid chat configuration: %w", err)
 	}
@@ -759,7 +790,7 @@ func checkVolumeMount(settings *config.Settings) (ok bool) {
 
 func activateServer(ctx context.Context, settings *config.Settings, sf *bot.SpamFilter, loc *storage.Locator,
 	db *engine.SQL, dmUsersProvider webapi.DMUsersProvider, botUsername string,
-	reloadNormalize func(*config.Settings)) (err error) {
+	reloadNormalize func(*config.Settings) error) (err error) {
 	// safety net: when --confdb leaves the web UI without any auth material, fall
 	// back to generating a random password (matches legacy behavior where CLI
 	// default --server.auth=auto would trigger random-password generation)
@@ -828,8 +859,9 @@ func activateServer(ctx context.Context, settings *config.Settings, sf *bot.Spam
 		Version:         revision,
 		Dbg:             settings.Transient.Dbg,
 		BotUsername:     botUsername,
-		AppSettings:     settings,
-		ConfigDBMode:    settings.Transient.ConfigDB, // indicate we're running with database config
+		AppSettings:       settings,
+		ConfigDBMode:      settings.Transient.ConfigDB, // indicate we're running with database config
+		YAMLOverlayActive: settings.Transient.YAMLOverlayActive,
 		// applies startup-equivalent defaults-fill + operational CLI overrides on /config/reload
 		ReloadNormalize: reloadNormalize,
 	}

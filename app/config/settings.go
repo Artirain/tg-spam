@@ -321,6 +321,12 @@ type TransientSettings struct {
 	Dbg      bool `json:"-" yaml:"-"`
 	TGDbg    bool `json:"-" yaml:"-"`
 
+	// YAMLOverlayActive is true when the operator started the bot with a
+	// --config YAML overlay. Read by activateServer to gate webapi save/update
+	// handlers: store.Save marshals to JSON and would silently drop
+	// telegram.groups + admin.superusers_cross_chat (both json:"-").
+	YAMLOverlayActive bool `json:"-" yaml:"-"`
+
 	// encryption for database stored configuration
 	ConfigDBEncryptKey string `json:"-" yaml:"-"`
 

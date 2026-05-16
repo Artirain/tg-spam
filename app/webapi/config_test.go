@@ -3,6 +3,7 @@ package webapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -471,13 +472,14 @@ func TestLoadConfigHandler(t *testing.T) {
 
 		// closure mirrors the production wiring: defaults-fill plus operational
 		// CLI override reapplication
-		normalize := func(s *config.Settings) {
+		normalize := func(s *config.Settings) error {
 			if s.Meta.LinksLimit == 0 {
 				s.Meta.LinksLimit = -1 // simulate ApplyDefaults filling a meta default
 			}
 			s.Server.ListenAddr = ":9090" // simulate CLI override reapplication
 			s.Files.DynamicDataPath = "/var/data"
 			s.Dry = true
+			return nil
 		}
 
 		srv := Server{
@@ -532,6 +534,101 @@ func TestLoadConfigHandler(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, "stored-instance", srv.AppSettings.InstanceID)
 	})
+
+	t.Run("ReloadNormalize error aborts swap and returns 500", func(t *testing.T) {
+		// when the reload normalizer fails (broken YAML overlay, duplicate gid,
+		// etc.), the handler must NOT replace AppSettings — the running
+		// configuration stays intact and the operator sees an error.
+		storedSettings := &config.Settings{InstanceID: "stored-instance"}
+		settingsStore := &mocks.SettingsStoreMock{
+			LoadFunc: func(ctx context.Context) (*config.Settings, error) {
+				return storedSettings, nil
+			},
+		}
+		appSettings := &config.Settings{InstanceID: "test-instance-preserved"}
+
+		srv := Server{
+			Config: Config{
+				SettingsStore: settingsStore,
+				AppSettings:   appSettings,
+				ReloadNormalize: func(s *config.Settings) error {
+					return fmt.Errorf("yaml overlay parse failure")
+				},
+			},
+		}
+
+		req := httptest.NewRequest("POST", "/config/reload", http.NoBody)
+		w := httptest.NewRecorder()
+		srv.loadConfigHandler(w, req)
+
+		assert.Equal(t, http.StatusInternalServerError, w.Code)
+		assert.Contains(t, w.Body.String(), "yaml overlay parse failure")
+		assert.Equal(t, "test-instance-preserved", srv.AppSettings.InstanceID,
+			"reload normalize failure must not swap AppSettings")
+	})
+}
+
+func TestSaveConfigHandler_RefusedWhenYAMLOverlayActive(t *testing.T) {
+	// POST /config must not write to the database when --config overlay is set:
+	// SettingsStore.Save marshals to JSON and json:"-" fields telegram.groups +
+	// admin.superusers_cross_chat would silently vanish. Web UI would report
+	// success while the DB blob is missing multi-chat configuration.
+	store := &mocks.SettingsStoreMock{
+		SaveFunc: func(ctx context.Context, settings *config.Settings) error {
+			t.Fatal("Save must not be called when YAMLOverlayActive=true")
+			return nil
+		},
+	}
+	srv := Server{
+		Config: Config{
+			SettingsStore:     store,
+			AppSettings:       &config.Settings{InstanceID: "yaml-overlay"},
+			YAMLOverlayActive: true,
+		},
+	}
+
+	req := httptest.NewRequest("POST", "/config", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.saveConfigHandler(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Contains(t, w.Body.String(), "--config YAML overlay is active")
+}
+
+func TestUpdateConfigHandler_RefusedSaveToDBWhenYAMLOverlayActive(t *testing.T) {
+	// PUT /config?saveToDb=true must refuse when --config overlay is active, for
+	// the same json:"-" reason. In-memory mutations must be rolled back so the
+	// "Save" attempt has no observable effect.
+	store := &mocks.SettingsStoreMock{
+		SaveFunc: func(ctx context.Context, settings *config.Settings) error {
+			t.Fatal("Save must not be called when YAMLOverlayActive=true")
+			return nil
+		},
+	}
+	original := &config.Settings{
+		InstanceID: "yaml-overlay",
+		Telegram:   config.TelegramSettings{Group: "preserved-group"},
+	}
+	srv := Server{
+		Config: Config{
+			SettingsStore:     store,
+			AppSettings:       original,
+			YAMLOverlayActive: true,
+		},
+	}
+
+	form := url.Values{}
+	form.Set("primaryGroup", "mutated-group")
+	form.Set("saveToDb", "true")
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.updateConfigHandler(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Contains(t, w.Body.String(), "--config YAML overlay is active")
+	assert.Equal(t, "preserved-group", srv.AppSettings.Telegram.Group,
+		"refused save must roll back in-memory mutation")
 }
 
 func TestUpdateConfigHandler(t *testing.T) {
